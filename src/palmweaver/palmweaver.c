@@ -2,7 +2,7 @@
  * Palmweaver - Text Editor for Windows CE
  * palmweaver.c - Main application
  *
- * Build 0.1.0.1 - Initial window with CommandBar and Edit control
+ * Build 0.1.0.4 - Add File Open/Save/Save As
  */
 
 #include <windows.h>
@@ -15,9 +15,17 @@ HWND g_hwndMain;
 HWND g_hwndCB;
 HWND g_hwndEdit;
 
+/* Current file state */
+static wchar_t g_szFilePath[MAX_PATH];
+static int g_bDirty = 0;
+
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
 static const WCHAR g_szAppTitle[] = L"Palmweaver";
+static const WCHAR g_szUntitled[] = L"Untitled";
+
+/* File filter for picker */
+static const WCHAR g_szFilter[] = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
 
 /* Forward declarations */
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -26,6 +34,18 @@ static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow);
 static void CreateMenuBar(HWND hwndCB);
 static void OnSize(HWND hwnd, int cx, int cy);
 static void ShowAboutDialog(HWND hwndParent);
+static void UpdateTitle(void);
+static void DoFileNew(void);
+static int DoFileOpen(void);
+static int DoFileSave(void);
+static int DoFileSaveAs(void);
+static int PromptSave(void);
+
+/* External: file picker */
+int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
+               const wchar_t *title, const wchar_t *filter,
+               const wchar_t *defExt, const wchar_t *initialDir,
+               int saveMode);
 
 /*
  * WinMain - Application entry point
@@ -175,6 +195,203 @@ static void ShowAboutDialog(HWND hwndParent)
 }
 
 /*
+ * UpdateTitle - Set window title based on current file
+ */
+static void UpdateTitle(void)
+{
+    wchar_t title[MAX_PATH + 32];
+    const wchar_t *name;
+    const wchar_t *p;
+
+    if (g_szFilePath[0]) {
+        /* Extract filename from path */
+        name = g_szFilePath;
+        p = g_szFilePath;
+        while (*p) {
+            if (*p == L'\\') name = p + 1;
+            p++;
+        }
+    } else {
+        name = g_szUntitled;
+    }
+
+    if (g_bDirty) {
+        wsprintfW(title, L"%s* - %s", name, g_szAppTitle);
+    } else {
+        wsprintfW(title, L"%s - %s", name, g_szAppTitle);
+    }
+    SetWindowTextW(g_hwndMain, title);
+}
+
+/*
+ * PromptSave - Ask user to save if dirty; returns 1 to proceed, 0 to cancel
+ */
+static int PromptSave(void)
+{
+    int result;
+
+    if (!g_bDirty) return 1;
+
+    result = MessageBoxW(g_hwndMain,
+        L"Save changes to current file?",
+        g_szAppTitle,
+        MB_YESNOCANCEL | MB_ICONQUESTION);
+
+    if (result == IDCANCEL) return 0;
+    if (result == IDYES) {
+        if (!DoFileSave()) return 0;
+    }
+    return 1;
+}
+
+/*
+ * DoFileNew - Clear editor for new file
+ */
+static void DoFileNew(void)
+{
+    if (!PromptSave()) return;
+
+    SetWindowTextW(g_hwndEdit, L"");
+    g_szFilePath[0] = 0;
+    g_bDirty = 0;
+    UpdateTitle();
+}
+
+/*
+ * DoFileOpen - Open a text file
+ */
+static int DoFileOpen(void)
+{
+    wchar_t szFile[MAX_PATH] = L"";
+    HANDLE hFile;
+    DWORD dwSize, dwRead;
+    char *pBuf;
+    wchar_t *pWBuf;
+    int i;
+
+    if (!PromptSave()) return 0;
+
+    if (!FilePicker(g_hwndMain, szFile, MAX_PATH,
+            L"Open File", g_szFilter, NULL, L"\\My Documents", 0)) {
+        return 0;
+    }
+
+    hFile = CreateFileW(szFile, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBoxW(g_hwndMain, L"Cannot open file.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    dwSize = GetFileSize(hFile, NULL);
+
+    /* Allocate buffer for file content + null */
+    pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 1);
+    if (!pBuf) {
+        CloseHandle(hFile);
+        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
+    CloseHandle(hFile);
+    pBuf[dwRead] = 0;
+
+    /* Check for UTF-16 BOM */
+    if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
+        /* UTF-16 LE - skip BOM, null-terminate */
+        wchar_t *pWide = (wchar_t *)(pBuf + 2);
+        int nChars = (dwRead - 2) / sizeof(wchar_t);
+        pWide[nChars] = 0;
+        SetWindowTextW(g_hwndEdit, pWide);
+    } else {
+        /* Assume ANSI - convert to Unicode */
+        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwRead + 1) * sizeof(wchar_t));
+        if (pWBuf) {
+            for (i = 0; i < (int)dwRead; i++) {
+                pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
+            }
+            pWBuf[dwRead] = 0;
+            SetWindowTextW(g_hwndEdit, pWBuf);
+            LocalFree(pWBuf);
+        }
+    }
+
+    LocalFree(pBuf);
+
+    lstrcpyW(g_szFilePath, szFile);
+    g_bDirty = 0;
+    UpdateTitle();
+    return 1;
+}
+
+/*
+ * DoFileSave - Save current file (or Save As if untitled)
+ */
+static int DoFileSave(void)
+{
+    HANDLE hFile;
+    DWORD dwLen, dwWritten;
+    wchar_t *pText;
+    unsigned char bom[2] = {0xFF, 0xFE};
+
+    if (!g_szFilePath[0]) {
+        return DoFileSaveAs();
+    }
+
+    hFile = CreateFileW(g_szFilePath, GENERIC_WRITE, 0, NULL,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBoxW(g_hwndMain, L"Cannot save file.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    dwLen = GetWindowTextLengthW(g_hwndEdit);
+    pText = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwLen + 1) * sizeof(wchar_t));
+    if (!pText) {
+        CloseHandle(hFile);
+        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    GetWindowTextW(g_hwndEdit, pText, dwLen + 1);
+
+    /* Write UTF-16 LE BOM */
+    WriteFile(hFile, bom, 2, &dwWritten, NULL);
+    /* Write text */
+    WriteFile(hFile, pText, dwLen * sizeof(wchar_t), &dwWritten, NULL);
+
+    CloseHandle(hFile);
+    LocalFree(pText);
+
+    g_bDirty = 0;
+    UpdateTitle();
+    return 1;
+}
+
+/*
+ * DoFileSaveAs - Save with new filename
+ */
+static int DoFileSaveAs(void)
+{
+    wchar_t szFile[MAX_PATH];
+
+    if (g_szFilePath[0]) {
+        lstrcpyW(szFile, g_szFilePath);
+    } else {
+        lstrcpyW(szFile, L"");
+    }
+
+    if (!FilePicker(g_hwndMain, szFile, MAX_PATH,
+            L"Save File", g_szFilter, L"txt", L"\\My Documents", 1)) {
+        return 0;
+    }
+
+    lstrcpyW(g_szFilePath, szFile);
+    return DoFileSave();
+}
+
+/*
  * MainWndProc - Main window message handler
  */
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -195,6 +412,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
 
         SetFocus(g_hwndEdit);
+        UpdateTitle();
         return 0;
 
     case WM_SIZE:
@@ -210,11 +428,25 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDM_FILE_NEW:
-            SetWindowTextW(g_hwndEdit, L"");
+            DoFileNew();
+            return 0;
+
+        case IDM_FILE_OPEN:
+            DoFileOpen();
+            return 0;
+
+        case IDM_FILE_SAVE:
+            DoFileSave();
+            return 0;
+
+        case IDM_FILE_SAVEAS:
+            DoFileSaveAs();
             return 0;
 
         case IDM_FILE_EXIT:
-            DestroyWindow(hwnd);
+            if (PromptSave()) {
+                DestroyWindow(hwnd);
+            }
             return 0;
 
         case IDM_EDIT_UNDO:
@@ -241,12 +473,28 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_HELP_ABOUT:
             ShowAboutDialog(hwnd);
             return 0;
+
+        case ID_EDIT:
+            /* Edit control notification */
+            if (HIWORD(wParam) == EN_CHANGE) {
+                if (!g_bDirty) {
+                    g_bDirty = 1;
+                    UpdateTitle();
+                }
+            }
+            return 0;
         }
         break;
 
     case WM_DESTROY:
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
+        return 0;
+
+    case WM_CLOSE:
+        if (PromptSave()) {
+            DestroyWindow(hwnd);
+        }
         return 0;
     }
 
