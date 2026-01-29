@@ -56,6 +56,7 @@ static int DoFileOpen(void);
 static int DoFileSave(void);
 static int DoFileSaveAs(void);
 static int PromptSave(void);
+static void DoGotoLine(void);
 
 /* External: file picker */
 int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
@@ -88,6 +89,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'O') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_OPEN, 0); return 1; }
         if (wParam == 'S') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_SAVE, 0); return 1; }
         if (wParam == 'W') { SendMessage(g_hwndMain, WM_CLOSE, 0, 0); return 1; }
+        if (wParam == 'G') { DoGotoLine(); return 1; }
     }
     return 0;
 }
@@ -216,6 +218,8 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_PASTE, L"&Paste\tCtrl+V");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All\tCtrl+A");
+    AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_GOTOLINE, L"&Go to Line...\tCtrl+G");
 
     /* View menu */
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
@@ -297,6 +301,129 @@ static void UpdateTitle(void)
         wsprintfW(title, L"%s - %s", name, g_szAppTitle);
     }
     SetWindowTextW(g_hwndMain, title);
+}
+
+/*
+ * Go to Line dialog
+ */
+static HWND g_hwndGotoDlg = NULL;
+static HWND g_hwndGotoEdit = NULL;
+static WNDPROC g_pfnGotoEditProc = NULL;
+
+static void GotoLineNumber(int lineNum)
+{
+    int charIdx, textLen, curLine, i;
+    wchar_t *text;
+
+    if (lineNum < 1) lineNum = 1;
+
+    textLen = GetWindowTextLengthW(g_hwndEdit);
+    if (textLen == 0) {
+        SendMessage(g_hwndEdit, EM_SETSEL, 0, 0);
+        return;
+    }
+
+    text = (wchar_t *)LocalAlloc(LMEM_FIXED, (textLen + 1) * sizeof(wchar_t));
+    if (!text) return;
+    GetWindowTextW(g_hwndEdit, text, textLen + 1);
+
+    /* Find character index of target line */
+    charIdx = 0;
+    curLine = 1;
+    for (i = 0; i < textLen && curLine < lineNum; i++) {
+        if (text[i] == '\n') {
+            curLine++;
+            charIdx = i + 1;
+        }
+    }
+    if (curLine < lineNum) charIdx = textLen;
+
+    LocalFree(text);
+
+    SendMessage(g_hwndEdit, EM_SETSEL, charIdx, charIdx);
+    SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+    SetFocus(g_hwndEdit);
+    UpdateStatus();
+}
+
+static LRESULT CALLBACK GotoEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_KEYDOWN) {
+        if (wParam == VK_RETURN) {
+            SendMessage(g_hwndGotoDlg, WM_COMMAND, IDOK, 0);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            SendMessage(g_hwndGotoDlg, WM_CLOSE, 0, 0);
+            return 0;
+        }
+    }
+    return CallWindowProc(g_pfnGotoEditProc, hwnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK GotoWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE:
+        CreateWindowW(L"STATIC", L"Line:",
+            WS_CHILD | WS_VISIBLE,
+            5, 8, 30, 16, hwnd, NULL, g_hInst, NULL);
+        g_hwndGotoEdit = CreateWindowW(L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_NUMBER,
+            38, 5, 60, 20, hwnd, (HMENU)101, g_hInst, NULL);
+        CreateWindowW(L"BUTTON", L"Go",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            105, 4, 40, 22, hwnd, (HMENU)IDOK, g_hInst, NULL);
+        g_pfnGotoEditProc = (WNDPROC)SetWindowLong(g_hwndGotoEdit, GWL_WNDPROC, (LONG)GotoEditProc);
+        SetFocus(g_hwndGotoEdit);
+        return 0;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            wchar_t buf[16];
+            int lineNum = 0, i;
+            GetWindowTextW(g_hwndGotoEdit, buf, 16);
+            for (i = 0; buf[i]; i++) lineNum = lineNum * 10 + (buf[i] - '0');
+            DestroyWindow(hwnd);
+            g_hwndGotoDlg = NULL;
+            GotoLineNumber(lineNum);
+        }
+        return 0;
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        g_hwndGotoDlg = NULL;
+        SetFocus(g_hwndEdit);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static void DoGotoLine(void)
+{
+    WNDCLASSW wc = {0};
+    RECT rc;
+
+    if (g_hwndGotoDlg) {
+        SetFocus(g_hwndGotoEdit);
+        return;
+    }
+
+    wc.lpfnWndProc = GotoWndProc;
+    wc.hInstance = g_hInst;
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"PalmweaverGoto";
+    RegisterClassW(&wc);
+
+    GetWindowRect(g_hwndMain, &rc);
+#ifndef WS_EX_TOOLWINDOW
+#define WS_EX_TOOLWINDOW 0x00000080L
+#endif
+    g_hwndGotoDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverGoto", L"Go to Line",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        rc.left + 20, rc.top + 50, 155, 52,
+        g_hwndMain, NULL, g_hInst, NULL);
+    ShowWindow(g_hwndGotoDlg, SW_SHOW);
 }
 
 /*
@@ -601,6 +728,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_EDIT_SELECTALL:
             SetFocus(g_hwndEdit);
             SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1);
+            return 0;
+
+        case IDM_EDIT_GOTOLINE:
+            DoGotoLine();
             return 0;
 
         case IDM_VIEW_WORDWRAP:
