@@ -1,0 +1,5 @@
+/* Palmweaver resource script */
+
+#define IDI_PALMWEAVER 1
+
+IDI_PALMWEAVER ICON "palmweaver.ico"

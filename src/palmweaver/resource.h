@@ -7,8 +7,8 @@
 #define RESOURCE_H
 
 /* Version - increment build number with each change */
-#define PALMWEAVER_VERSION      L"0.1.0.5"
-#define PALMWEAVER_VERSION_A    "0.1.0.5"
+#define PALMWEAVER_VERSION      L"0.1.0.14"
+#define PALMWEAVER_VERSION_A    "0.1.0.14"
 
 /* Menu */
 #define IDR_MENU                101
@@ -33,6 +33,9 @@
 /* Controls */
 #define ID_EDIT                 1001
 #define ID_STATUSBAR            1002
+
+/* Icons */
+#define IDI_PALMWEAVER          1
 
 /* Dialogs */
 #define IDD_ABOUT               601

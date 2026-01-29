@@ -9,15 +9,23 @@
 #include <commctrl.h>
 #include "resource.h"
 
+#ifndef ICON_SMALL
+#define ICON_SMALL 0
+#endif
+
 /* Global instance handle (CE has no GetModuleHandle) */
 HINSTANCE g_hInst;
 HWND g_hwndMain;
 HWND g_hwndCB;
 HWND g_hwndEdit;
+HWND g_hwndStatus;
 
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
+
+/* Edit control subclass */
+static WNDPROC g_pfnEditProc = NULL;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -35,6 +43,7 @@ static void CreateMenuBar(HWND hwndCB);
 static void OnSize(HWND hwnd, int cx, int cy);
 static void ShowAboutDialog(HWND hwndParent);
 static void UpdateTitle(void);
+static void UpdateStatus(void);
 static void DoFileNew(void);
 static int DoFileOpen(void);
 static int DoFileSave(void);
@@ -46,6 +55,20 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
                const wchar_t *title, const wchar_t *filter,
                const wchar_t *defExt, const wchar_t *initialDir,
                int saveMode);
+
+/*
+ * EditSubclassProc - Catch cursor movement for status updates
+ */
+static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    LRESULT result = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+
+    if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
+        UpdateStatus();
+    }
+
+    return result;
+}
 
 /*
  * WinMain - Application entry point
@@ -79,17 +102,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
  */
 static BOOL InitApplication(HINSTANCE hInstance)
 {
-    WNDCLASSW wc;
+    WNDCLASSW wc = {0};
 
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = MainWndProc;
-    wc.cbClsExtra = 0;
-    wc.cbWndExtra = 0;
     wc.hInstance = hInstance;
-    wc.hIcon = NULL;
-    wc.hCursor = NULL;
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_PALMWEAVER));
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszMenuName = NULL;
     wc.lpszClassName = g_szClassName;
 
     return RegisterClassW(&wc) != 0;
@@ -113,6 +132,11 @@ static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     if (!g_hwndMain) {
         return FALSE;
     }
+
+    /* Set small icon for taskbar */
+    SendMessage(g_hwndMain, WM_SETICON, ICON_SMALL,
+        (LPARAM)LoadImage(hInstance, MAKEINTRESOURCE(IDI_PALMWEAVER),
+            IMAGE_ICON, 16, 16, 0));
 
     ShowWindow(g_hwndMain, nCmdShow);
     UpdateWindow(g_hwndMain);
@@ -169,16 +193,23 @@ static void CreateMenuBar(HWND hwndCB)
  */
 static void OnSize(HWND hwnd, int cx, int cy)
 {
-    int cbHeight;
+    int cbHeight, sbHeight;
+    RECT rcStatus;
 
     (void)hwnd;
 
-    if (!g_hwndCB || !g_hwndEdit) {
+    if (!g_hwndCB || !g_hwndEdit || !g_hwndStatus) {
         return;
     }
 
     cbHeight = CommandBar_Height(g_hwndCB);
-    MoveWindow(g_hwndEdit, 0, cbHeight, cx, cy - cbHeight, TRUE);
+
+    /* Let status bar auto-size, then get its height */
+    SendMessageW(g_hwndStatus, WM_SIZE, 0, 0);
+    GetWindowRect(g_hwndStatus, &rcStatus);
+    sbHeight = rcStatus.bottom - rcStatus.top;
+
+    MoveWindow(g_hwndEdit, 0, cbHeight, cx, cy - cbHeight - sbHeight, TRUE);
 }
 
 /*
@@ -221,6 +252,31 @@ static void UpdateTitle(void)
         wsprintfW(title, L"%s - %s", name, g_szAppTitle);
     }
     SetWindowTextW(g_hwndMain, title);
+}
+
+/*
+ * UpdateStatus - Update status bar with cursor position
+ */
+static void UpdateStatus(void)
+{
+    static DWORD s_lastSel = (DWORD)-1;
+    DWORD sel;
+    int line, col;
+    int lineStart;
+    wchar_t buf[64];
+
+    sel = (DWORD)SendMessageW(g_hwndEdit, EM_GETSEL, 0, 0);
+    if (sel == s_lastSel) return;
+    s_lastSel = sel;
+
+    /* Get line number from character index (caret is in LOWORD) */
+    line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, LOWORD(sel), 0);
+    /* Get character index of line start */
+    lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, line, 0);
+    col = LOWORD(sel) - lineStart;
+
+    wsprintfW(buf, L"Ln %d, Col %d", line + 1, col + 1);
+    SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)buf);
 }
 
 /*
@@ -403,7 +459,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         CreateMenuBar(g_hwndCB);
         CommandBar_AddAdornments(g_hwndCB, 0, 0);
 
-        /* Create Edit control - fills client area below CommandBar */
+        /* Create Status bar */
+        g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, hwnd, (HMENU)ID_STATUSBAR, g_hInst, NULL);
+
+        /* Create Edit control - fills client area between CommandBar and Status */
         g_hwndEdit = CreateWindowW(
             L"EDIT", NULL,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
@@ -411,8 +472,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             0, 0, 0, 0,
             hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
 
+        /* Subclass edit control for cursor tracking */
+        g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
+            (LONG)EditSubclassProc);
+
         SetFocus(g_hwndEdit);
         UpdateTitle();
+        UpdateStatus();
         return 0;
 
     case WM_SIZE:
@@ -481,6 +547,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     g_bDirty = 1;
                     UpdateTitle();
                 }
+                UpdateStatus();
             }
             return 0;
         }
