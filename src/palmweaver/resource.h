@@ -6,9 +6,9 @@
 #ifndef RESOURCE_H
 #define RESOURCE_H
 
-/* Version - increment build number with each change */
-#define PALMWEAVER_VERSION      L"0.1.0.16"
-#define PALMWEAVER_VERSION_A    "0.1.0.16"
+/* Version */
+#define PALMWEAVER_VERSION      L"0.1.0"
+#define PALMWEAVER_VERSION_A    "0.1.0"
 
 /* Menu */
 #define IDR_MENU                101
