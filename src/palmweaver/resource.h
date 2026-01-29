@@ -7,8 +7,8 @@
 #define RESOURCE_H
 
 /* Version */
-#define PALMWEAVER_VERSION      L"0.2.0.11"
-#define PALMWEAVER_VERSION_A    "0.2.0.11"
+#define PALMWEAVER_VERSION      L"0.2.0.14"
+#define PALMWEAVER_VERSION_A    "0.2.0.14"
 
 /* Menu */
 #define IDR_MENU                101
@@ -27,6 +27,9 @@
 #define IDM_EDIT_PASTE          304
 #define IDM_EDIT_SELECTALL      305
 #define IDM_EDIT_GOTOLINE       306
+#define IDM_EDIT_FIND           307
+#define IDM_EDIT_FINDNEXT       308
+#define IDM_EDIT_REPLACE        309
 
 /* Menu Items - View */
 #define IDM_VIEW_WORDWRAP       351
