@@ -192,22 +192,22 @@ static void CreateMenuBar(HWND hwndCB)
     hMenuHelp = CreatePopupMenu();
 
     /* File menu */
-    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_NEW, L"&New");
-    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_OPEN, L"&Open...");
+    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_NEW, L"&New\tCtrl+N");
+    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_OPEN, L"&Open...\tCtrl+O");
     AppendMenuW(hMenuFile, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVE, L"&Save");
+    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVE, L"&Save\tCtrl+S");
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVEAS, L"Save &As...");
     AppendMenuW(hMenuFile, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_EXIT, L"E&xit");
+    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tCtrl+W");
 
     /* Edit menu */
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_UNDO, L"&Undo");
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_UNDO, L"&Undo\tCtrl+Z");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_CUT, L"Cu&t");
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_COPY, L"&Copy");
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_PASTE, L"&Paste");
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_CUT, L"Cu&t\tCtrl+X");
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_COPY, L"&Copy\tCtrl+C");
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_PASTE, L"&Paste\tCtrl+V");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All");
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All\tCtrl+A");
 
     /* Help menu */
     AppendMenuW(hMenuHelp, MF_STRING, IDM_HELP_ABOUT, L"&About...");
