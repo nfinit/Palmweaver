@@ -24,10 +24,12 @@ HWND g_hwndCB;
 HWND g_hwndEdit;
 HWND g_hwndStatus;
 HFONT g_hFont;
+HMENU g_hViewMenu;
 
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
+static int g_bWordWrap = 1;  /* Word wrap on by default */
 
 /* Edit control subclass */
 static WNDPROC g_pfnEditProc = NULL;
@@ -184,11 +186,13 @@ static void CreateMenuBar(HWND hwndCB)
     HMENU hMenu;
     HMENU hMenuFile;
     HMENU hMenuEdit;
+    HMENU hMenuView;
     HMENU hMenuHelp;
 
     hMenu = CreateMenu();
     hMenuFile = CreatePopupMenu();
     hMenuEdit = CreatePopupMenu();
+    hMenuView = CreatePopupMenu();
     hMenuHelp = CreatePopupMenu();
 
     /* File menu */
@@ -209,12 +213,17 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All\tCtrl+A");
 
+    /* View menu */
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
+    g_hViewMenu = hMenuView;
+
     /* Help menu */
     AppendMenuW(hMenuHelp, MF_STRING, IDM_HELP_ABOUT, L"&About...");
 
     /* Attach to menu bar */
     AppendMenuW(hMenu, MF_POPUP, (UINT)hMenuFile, L"&File");
     AppendMenuW(hMenu, MF_POPUP, (UINT)hMenuEdit, L"&Edit");
+    AppendMenuW(hMenu, MF_POPUP, (UINT)hMenuView, L"&View");
     AppendMenuW(hMenu, MF_POPUP, (UINT)hMenuHelp, L"&Help");
 
     CommandBar_InsertMenubarEx(hwndCB, NULL, (LPTSTR)hMenu, 0);
@@ -578,6 +587,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_EDIT_SELECTALL:
             SetFocus(g_hwndEdit);
             SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1);
+            return 0;
+
+        case IDM_VIEW_WORDWRAP:
+            {
+                LONG style = GetWindowLong(g_hwndEdit, GWL_STYLE);
+                g_bWordWrap = !g_bWordWrap;
+                if (g_bWordWrap) {
+                    style &= ~(WS_HSCROLL | ES_AUTOHSCROLL);
+                    CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP, MF_CHECKED);
+                } else {
+                    style |= WS_HSCROLL | ES_AUTOHSCROLL;
+                    CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP, MF_UNCHECKED);
+                }
+                SetWindowLong(g_hwndEdit, GWL_STYLE, style);
+                SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
             return 0;
 
         case IDM_HELP_ABOUT:
