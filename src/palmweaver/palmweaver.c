@@ -62,17 +62,44 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
                int saveMode);
 
 /*
+ * HandleGlobalKeys - Centralized keyboard handler for app-wide shortcuts.
+ * Returns 1 if key was handled, 0 otherwise.
+ */
+static int HandleGlobalKeys(UINT msg, WPARAM wParam)
+{
+    int ctrl = GetKeyState(VK_CONTROL) < 0;
+    int alt = GetKeyState(VK_MENU) < 0;
+
+    if (msg == WM_SYSKEYDOWN) {
+        /* Alt+X = Exit */
+        if ((wParam == 'X' || wParam == 'x') && alt) {
+            SendMessage(g_hwndMain, WM_CLOSE, 0, 0);
+            return 1;
+        }
+    }
+    if (msg == WM_KEYDOWN && ctrl) {
+        if (wParam == 'N') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_NEW, 0); return 1; }
+        if (wParam == 'O') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_OPEN, 0); return 1; }
+        if (wParam == 'S') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_SAVE, 0); return 1; }
+        if (wParam == 'W') { SendMessage(g_hwndMain, WM_CLOSE, 0, 0); return 1; }
+    }
+    return 0;
+}
+
+/*
  * EditSubclassProc - Catch cursor movement for status updates
  */
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    LRESULT result = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+    /* Global shortcuts first */
+    if (HandleGlobalKeys(msg, wParam))
+        return 0;
 
     if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
         UpdateStatus();
     }
 
-    return result;
+    return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
 }
 
 /*
