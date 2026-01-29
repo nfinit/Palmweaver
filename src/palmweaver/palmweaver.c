@@ -481,8 +481,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             /* Create Edit control - fills client area between CommandBar and Status */
             g_hwndEdit = CreateWindowW(
                 L"EDIT", NULL,
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
-                ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                ES_MULTILINE | ES_AUTOVSCROLL,
                 0, 0, 0, 0,
                 hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
 
