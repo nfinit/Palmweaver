@@ -1,0 +1,6 @@
+# macOS dotfiles
+._*
+.DS_Store
+# Agent steering
+AGENTS/
+.kiro/
