@@ -13,12 +13,17 @@
 #define ICON_SMALL 0
 #endif
 
+#ifndef IDI_PALMWEAVER
+#define IDI_PALMWEAVER 1
+#endif
+
 /* Global instance handle (CE has no GetModuleHandle) */
 HINSTANCE g_hInst;
 HWND g_hwndMain;
 HWND g_hwndCB;
 HWND g_hwndEdit;
 HWND g_hwndStatus;
+HFONT g_hFont;
 
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
@@ -454,31 +459,43 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
     case WM_CREATE:
-        /* Create CommandBar */
-        g_hwndCB = CommandBar_Create(g_hInst, hwnd, 1);
-        CreateMenuBar(g_hwndCB);
-        CommandBar_AddAdornments(g_hwndCB, 0, 0);
+        {
+            LOGFONTW lf = {0};
 
-        /* Create Status bar */
-        g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
-            WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, hwnd, (HMENU)ID_STATUSBAR, g_hInst, NULL);
+            /* Create CommandBar */
+            g_hwndCB = CommandBar_Create(g_hInst, hwnd, 1);
+            CreateMenuBar(g_hwndCB);
+            CommandBar_AddAdornments(g_hwndCB, 0, 0);
 
-        /* Create Edit control - fills client area between CommandBar and Status */
-        g_hwndEdit = CreateWindowW(
-            L"EDIT", NULL,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
-            ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-            0, 0, 0, 0,
-            hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
+            /* Create Status bar */
+            g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
+                WS_CHILD | WS_VISIBLE,
+                0, 0, 0, 0, hwnd, (HMENU)ID_STATUSBAR, g_hInst, NULL);
 
-        /* Subclass edit control for cursor tracking */
-        g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
-            (LONG)EditSubclassProc);
+            /* Create monospace font */
+            lf.lfHeight = 14;
+            lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+            lstrcpyW(lf.lfFaceName, L"Courier New");
+            g_hFont = CreateFontIndirectW(&lf);
 
-        SetFocus(g_hwndEdit);
-        UpdateTitle();
-        UpdateStatus();
+            /* Create Edit control - fills client area between CommandBar and Status */
+            g_hwndEdit = CreateWindowW(
+                L"EDIT", NULL,
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+                ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                0, 0, 0, 0,
+                hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
+
+            SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+            /* Subclass edit control for cursor tracking */
+            g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
+                (LONG)EditSubclassProc);
+
+            SetFocus(g_hwndEdit);
+            UpdateTitle();
+            UpdateStatus();
+        }
         return 0;
 
     case WM_SIZE:
@@ -554,6 +571,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        if (g_hFont) DeleteObject(g_hFont);
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
         return 0;
