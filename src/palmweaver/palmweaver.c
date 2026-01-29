@@ -29,7 +29,7 @@ HMENU g_hViewMenu;
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
-static int g_bWordWrap = 1;  /* Word wrap on by default */
+int g_bWordWrap = 1;  /* Word wrap on by default */
 
 /* Edit control subclass */
 static WNDPROC g_pfnEditProc = NULL;
@@ -62,6 +62,10 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
                const wchar_t *title, const wchar_t *filter,
                const wchar_t *defExt, const wchar_t *initialDir,
                int saveMode);
+
+/* External: settings */
+void LoadSettings(void);
+void SaveSettings(void);
 
 /*
  * HandleGlobalKeys - Centralized keyboard handler for app-wide shortcuts.
@@ -497,11 +501,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
         {
             LOGFONTW lf = {0};
+            DWORD editStyle;
+
+            /* Load settings before creating controls */
+            LoadSettings();
 
             /* Create CommandBar */
             g_hwndCB = CommandBar_Create(g_hInst, hwnd, 1);
             CreateMenuBar(g_hwndCB);
             CommandBar_AddAdornments(g_hwndCB, 0, 0);
+
+            /* Update menu checkmark to match loaded setting */
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP,
+                g_bWordWrap ? MF_CHECKED : MF_UNCHECKED);
 
             /* Create Status bar */
             g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
@@ -514,11 +526,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             lstrcpyW(lf.lfFaceName, L"Courier New");
             g_hFont = CreateFontIndirectW(&lf);
 
-            /* Create Edit control - fills client area between CommandBar and Status */
+            /* Create Edit control - style depends on word wrap setting */
+            editStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL;
+            if (!g_bWordWrap)
+                editStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
+
             g_hwndEdit = CreateWindowW(
-                L"EDIT", NULL,
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL |
-                ES_MULTILINE | ES_AUTOVSCROLL,
+                L"EDIT", NULL, editStyle,
                 0, 0, 0, 0,
                 hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
 
@@ -624,6 +638,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        SaveSettings();
         if (g_hFont) DeleteObject(g_hFont);
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
