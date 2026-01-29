@@ -234,6 +234,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case IDM_EDIT_SELECTALL:
+            SetFocus(g_hwndEdit);
             SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1);
             return 0;
 
