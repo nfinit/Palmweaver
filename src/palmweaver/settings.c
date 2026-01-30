@@ -9,6 +9,7 @@
 
 /* Settings - declared extern in palmweaver.c */
 extern int g_bWordWrap;
+extern int g_bShowLineNums;
 
 /*
  * LoadSettings - Load settings from registry
@@ -24,6 +25,10 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"WordWrap", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bWordWrap = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"ShowLineNums", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bShowLineNums = (int)val;
 
     RegCloseKey(hKey);
 }
@@ -41,6 +46,9 @@ void SaveSettings(void)
 
     val = (DWORD)g_bWordWrap;
     RegSetValueExW(hKey, L"WordWrap", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
+    val = (DWORD)g_bShowLineNums;
+    RegSetValueExW(hKey, L"ShowLineNums", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
     RegCloseKey(hKey);
 }

@@ -23,16 +23,21 @@ HWND g_hwndMain;
 HWND g_hwndCB;
 HWND g_hwndEdit;
 HWND g_hwndStatus;
+HWND g_hwndLineNum;
 HFONT g_hFont;
+HBRUSH g_hBrushWhite;
 HMENU g_hViewMenu;
 
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
 int g_bWordWrap = 1;  /* Word wrap on by default */
+int g_bShowLineNums = 1;  /* Line numbers on by default */
+static int g_lineNumWidth = 30;
 
 /* Edit control subclass */
 static WNDPROC g_pfnEditProc = NULL;
+static WNDPROC g_pfnLineNumProc = NULL;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -60,6 +65,7 @@ static void DoGotoLine(void);
 static void DoFind(void);
 static void DoFindNext(void);
 static void DoReplace(void);
+static void UpdateLineNumbers(void);
 
 /* External: file picker */
 int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
@@ -119,8 +125,16 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
     }
 
+    /* Sync line numbers on scroll */
+    if (msg == WM_VSCROLL) {
+        LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+        UpdateLineNumbers();
+        return r;
+    }
+
     if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
         UpdateStatus();
+        UpdateLineNumbers();
     }
 
     return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
@@ -243,6 +257,7 @@ static void CreateMenuBar(HWND hwndCB)
 
     /* View menu */
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers");
     g_hViewMenu = hMenuView;
 
     /* Help menu */
@@ -262,13 +277,18 @@ static void CreateMenuBar(HWND hwndCB)
  */
 static void OnSize(HWND hwnd, int cx, int cy)
 {
-    int cbHeight, sbHeight;
-    RECT rcStatus;
-
-    (void)hwnd;
+    int cbHeight, sbHeight, editLeft, editHeight;
+    RECT rcClient, rcStatus;
 
     if (!g_hwndCB || !g_hwndEdit || !g_hwndStatus) {
         return;
+    }
+
+    /* Get actual client size if called with 0,0 */
+    if (cx == 0 && cy == 0) {
+        GetClientRect(hwnd, &rcClient);
+        cx = rcClient.right;
+        cy = rcClient.bottom;
     }
 
     cbHeight = CommandBar_Height(g_hwndCB);
@@ -278,7 +298,13 @@ static void OnSize(HWND hwnd, int cx, int cy)
     GetWindowRect(g_hwndStatus, &rcStatus);
     sbHeight = rcStatus.bottom - rcStatus.top;
 
-    MoveWindow(g_hwndEdit, 0, cbHeight, cx, cy - cbHeight - sbHeight, TRUE);
+    editHeight = cy - cbHeight - sbHeight;
+    editLeft = g_bShowLineNums ? g_lineNumWidth : 0;
+
+    if (g_hwndLineNum)
+        MoveWindow(g_hwndLineNum, 0, cbHeight, g_lineNumWidth, editHeight, TRUE);
+
+    MoveWindow(g_hwndEdit, editLeft, cbHeight, cx - editLeft, editHeight, TRUE);
 }
 
 /*
@@ -801,6 +827,95 @@ static void DoReplace(void)
 }
 
 /*
+ * Line number gutter
+ */
+static LRESULT CALLBACK LineNumProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    /* Block all input - read only display */
+    if (msg == WM_CHAR || msg == WM_KEYDOWN || msg == WM_LBUTTONDOWN ||
+        msg == WM_RBUTTONDOWN || msg == WM_LBUTTONDBLCLK)
+        return 0;
+    return CallWindowProc(g_pfnLineNumProc, hwnd, msg, wParam, lParam);
+}
+
+static void UpdateLineNumbers(void)
+{
+    static wchar_t *cachedText = NULL;
+    static int cachedLen = -1;
+    wchar_t buf[4096];
+    wchar_t *text = NULL;
+    int i, visLines, firstVisible, pos = 0, textLen;
+    int charIdx, logicalLine;
+
+    if (!g_bShowLineNums || !g_hwndLineNum || !g_hFont) return;
+
+    visLines = (int)SendMessage(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+    textLen = GetWindowTextLengthW(g_hwndEdit);
+
+    /* Cache text for performance */
+    if (textLen == cachedLen && cachedText) {
+        text = cachedText;
+    } else {
+        if (cachedText) { LocalFree(cachedText); cachedText = NULL; }
+        cachedLen = textLen;
+        if (textLen > 0) {
+            cachedText = (wchar_t *)LocalAlloc(LMEM_FIXED, (textLen + 1) * sizeof(wchar_t));
+            if (cachedText) GetWindowTextW(g_hwndEdit, cachedText, textLen + 1);
+        }
+        text = cachedText;
+    }
+
+    /* Auto-size gutter width based on line count */
+    {
+        int logicalTotal = 1;
+        if (text) {
+            for (i = 0; i < textLen; i++)
+                if (text[i] == '\n') logicalTotal++;
+        }
+        {
+            HDC hdc = GetDC(g_hwndLineNum);
+            HFONT hOld = (HFONT)SelectObject(hdc, g_hFont);
+            SIZE sz;
+            wchar_t numBuf[16];
+            int newWidth;
+            wsprintfW(numBuf, L"%d", logicalTotal);
+            GetTextExtentPoint32W(hdc, numBuf, lstrlenW(numBuf), &sz);
+            newWidth = sz.cx + 10;
+            if (newWidth < 25) newWidth = 25;
+            SelectObject(hdc, hOld);
+            ReleaseDC(g_hwndLineNum, hdc);
+            if (newWidth != g_lineNumWidth) {
+                g_lineNumWidth = newWidth;
+                SendMessage(g_hwndMain, WM_SIZE, 0, 0);
+            }
+        }
+    }
+
+    firstVisible = (int)SendMessage(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+
+    /* Find logical line number at first visible line */
+    charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, firstVisible, 0);
+    logicalLine = 1;
+    if (text) {
+        for (i = 0; i < charIdx && i < textLen; i++)
+            if (text[i] == '\n') logicalLine++;
+    }
+
+    /* Build line number text - blank for wrapped continuations */
+    for (i = firstVisible; i < visLines && pos < 4000; i++) {
+        charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, i, 0);
+        if (i == 0 || (text && charIdx > 0 && text[charIdx - 1] == '\n')) {
+            pos += wsprintfW(buf + pos, L"%d\r\n", logicalLine);
+            logicalLine++;
+        } else {
+            pos += wsprintfW(buf + pos, L"\r\n");
+        }
+    }
+    buf[pos] = 0;
+    SetWindowTextW(g_hwndLineNum, buf);
+}
+
+/*
  * UpdateStatus - Update status bar with cursor position
  */
 static void UpdateStatus(void)
@@ -1007,14 +1122,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             /* Load settings before creating controls */
             LoadSettings();
 
+            /* Create white brush for edit backgrounds */
+            g_hBrushWhite = CreateSolidBrush(RGB(255, 255, 255));
+
             /* Create CommandBar */
             g_hwndCB = CommandBar_Create(g_hInst, hwnd, 1);
             CreateMenuBar(g_hwndCB);
             CommandBar_AddAdornments(g_hwndCB, 0, 0);
 
-            /* Update menu checkmark to match loaded setting */
+            /* Update menu checkmarks to match loaded settings */
             CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP,
                 g_bWordWrap ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_LINENUMS,
+                g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
 
             /* Create Status bar */
             g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
@@ -1027,8 +1147,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             lstrcpyW(lf.lfFaceName, L"Courier New");
             g_hFont = CreateFontIndirectW(&lf);
 
+            /* Create line number gutter */
+            g_hwndLineNum = CreateWindowW(
+                L"EDIT", L"",
+                WS_CHILD | WS_BORDER | (g_bShowLineNums ? WS_VISIBLE : 0) |
+                ES_MULTILINE | ES_RIGHT,
+                0, 0, g_lineNumWidth, 0,
+                hwnd, (HMENU)1003, g_hInst, NULL);
+            SendMessage(g_hwndLineNum, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+            SendMessage(g_hwndLineNum, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELONG(0, 2));
+            g_pfnLineNumProc = (WNDPROC)SetWindowLong(g_hwndLineNum, GWL_WNDPROC,
+                (LONG)LineNumProc);
+
             /* Create Edit control - style depends on word wrap setting */
-            editStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL;
+            editStyle = WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL;
             if (!g_bWordWrap)
                 editStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
 
@@ -1036,6 +1168,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 L"EDIT", NULL, editStyle,
                 0, 0, 0, 0,
                 hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
+            SendMessage(g_hwndEdit, EM_SETMARGINS, EC_LEFTMARGIN, MAKELONG(2, 0));
 
             SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
@@ -1046,6 +1179,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetFocus(g_hwndEdit);
             UpdateTitle();
             UpdateStatus();
+            UpdateLineNumbers();
         }
         return 0;
 
@@ -1134,7 +1268,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SetWindowLong(g_hwndEdit, GWL_STYLE, style);
                 SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                UpdateLineNumbers();
+                SetFocus(g_hwndEdit);
             }
+            return 0;
+
+        case IDM_VIEW_LINENUMS:
+            g_bShowLineNums = !g_bShowLineNums;
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_LINENUMS,
+                g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
+            ShowWindow(g_hwndLineNum, g_bShowLineNums ? SW_SHOW : SW_HIDE);
+            SendMessage(hwnd, WM_SIZE, 0, 0);
+            if (g_bShowLineNums) UpdateLineNumbers();
+            SetFocus(g_hwndEdit);
             return 0;
 
         case IDM_HELP_ABOUT:
@@ -1149,13 +1295,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     UpdateTitle();
                 }
                 UpdateStatus();
+                UpdateLineNumbers();
             }
             return 0;
         }
         break;
 
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)lParam == g_hwndLineNum || (HWND)lParam == g_hwndEdit) {
+            SetBkColor((HDC)wParam, RGB(255, 255, 255));
+            return (LRESULT)g_hBrushWhite;
+        }
+        break;
+
     case WM_DESTROY:
         SaveSettings();
+        if (g_hBrushWhite) DeleteObject(g_hBrushWhite);
         if (g_hFont) DeleteObject(g_hFont);
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
