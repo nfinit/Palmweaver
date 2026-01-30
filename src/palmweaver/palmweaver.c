@@ -114,6 +114,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'G') { DoGotoLine(); return 1; }
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
+        if (wParam == '3') { DoFindNext(); return 1; }
     }
     if (msg == WM_KEYDOWN && wParam == VK_F3) {
         DoFindNext();
@@ -277,7 +278,7 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All\tCtrl+A");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FIND, L"&Find...\tCtrl+F");
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FINDNEXT, L"Find &Next\tF3");
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FINDNEXT, L"Find &Next\tCtrl+3");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_REPLACE, L"&Replace...\tCtrl+H");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_GOTOLINE, L"&Go to Line...\tCtrl+G");
