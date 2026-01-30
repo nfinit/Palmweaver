@@ -42,6 +42,11 @@ static int g_lineNumWidth = 20;
 int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
 int g_nTabSize = 4;    /* Number of spaces per tab */
 
+/* Font settings */
+static int g_fontSizes[] = {10, 12, 14, 16};
+static int g_fontSizeIdx = 2;  /* Default 14 */
+static int g_bFixedFont = 1;   /* Default fixed (Courier New) */
+
 /* Recent files */
 wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH] = {0};
 int g_recentCount = 0;
@@ -81,6 +86,7 @@ static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
 static void OpenRecentFile(int index);
 static void DoOptions(void);
+static void UpdateFont(void);
 
 /* External: file picker */
 int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
@@ -129,6 +135,15 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
+        /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
+        if (wParam == VK_ADD || wParam == 0xBB) {  /* Numpad+ or =/+ key */
+            if (g_fontSizeIdx < 3) { g_fontSizeIdx++; UpdateFont(); }
+            return 1;
+        }
+        if (wParam == VK_SUBTRACT || wParam == 0xBD) {  /* Numpad- or -/_ key */
+            if (g_fontSizeIdx > 0) { g_fontSizeIdx--; UpdateFont(); }
+            return 1;
+        }
     }
     if (msg == WM_KEYDOWN && wParam == VK_F3) {
         DoFindNext();
@@ -897,13 +912,6 @@ static HWND g_hwndOptTabSize = NULL;
 
 /* External: settings */
 void ClearSettings(void);
-
-/*
- * Font settings
- */
-static int g_fontSizes[] = {10, 12, 14, 16};
-static int g_fontSizeIdx = 2;  /* Default 14 */
-static int g_bFixedFont = 1;   /* Default fixed (Courier New) */
 
 static void UpdateFont(void)
 {
