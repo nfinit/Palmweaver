@@ -479,6 +479,15 @@ static HWND g_hwndFindDlg = NULL;
 static HWND g_hwndFindEdit = NULL;
 static WNDPROC g_pfnFindEditProc = NULL;
 static wchar_t g_findText[128] = L"";
+static int g_bMatchCase = 0;
+
+static int CharsMatch(wchar_t c1, wchar_t c2)
+{
+    if (g_bMatchCase) return c1 == c2;
+    if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+    if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+    return c1 == c2;
+}
 
 static void DoFindNext(void)
 {
@@ -503,10 +512,7 @@ static void DoFindNext(void)
     /* Search forward with wrap */
     for (i = start; i <= len - findLen; i++) {
         for (j = 0; j < findLen; j++) {
-            wchar_t c1 = buf[i + j], c2 = g_findText[j];
-            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-            if (c1 != c2) break;
+            if (!CharsMatch(buf[i + j], g_findText[j])) break;
         }
         if (j == findLen) {
             SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
@@ -517,10 +523,7 @@ static void DoFindNext(void)
     }
     for (i = 0; i < start && i <= len - findLen; i++) {
         for (j = 0; j < findLen; j++) {
-            wchar_t c1 = buf[i + j], c2 = g_findText[j];
-            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-            if (c1 != c2) break;
+            if (!CharsMatch(buf[i + j], g_findText[j])) break;
         }
         if (j == findLen) {
             SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
@@ -548,6 +551,8 @@ static LRESULT CALLBACK FindEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     return CallWindowProc(g_pfnFindEditProc, hwnd, msg, wParam, lParam);
 }
 
+static HWND g_hwndFindCase = NULL;
+
 static LRESULT CALLBACK FindWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -558,6 +563,10 @@ static LRESULT CALLBACK FindWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         CreateWindowW(L"BUTTON", L"Find",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             145, 4, 45, 22, hwnd, (HMENU)IDOK, g_hInst, NULL);
+        g_hwndFindCase = CreateWindowW(L"BUTTON", L"Match case",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            5, 28, 85, 18, hwnd, (HMENU)102, g_hInst, NULL);
+        SendMessage(g_hwndFindCase, BM_SETCHECK, g_bMatchCase, 0);
         g_pfnFindEditProc = (WNDPROC)SetWindowLong(g_hwndFindEdit, GWL_WNDPROC, (LONG)FindEditProc);
         SetFocus(g_hwndFindEdit);
         SendMessage(g_hwndFindEdit, EM_SETSEL, 0, -1);
@@ -566,6 +575,7 @@ static LRESULT CALLBACK FindWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
             GetWindowTextW(g_hwndFindEdit, g_findText, 128);
+            g_bMatchCase = (int)SendMessage(g_hwndFindCase, BM_GETCHECK, 0, 0);
             DestroyWindow(hwnd);
             g_hwndFindDlg = NULL;
             SetFocus(g_hwndEdit);
@@ -574,6 +584,7 @@ static LRESULT CALLBACK FindWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_CLOSE:
+        g_bMatchCase = (int)SendMessage(g_hwndFindCase, BM_GETCHECK, 0, 0);
         DestroyWindow(hwnd);
         g_hwndFindDlg = NULL;
         SetFocus(g_hwndEdit);
@@ -601,7 +612,7 @@ static void DoFind(void)
     GetWindowRect(g_hwndMain, &rc);
     g_hwndFindDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverFind", L"Find",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        rc.left + 20, rc.top + 50, 200, 52,
+        rc.left + 20, rc.top + 50, 200, 72,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndFindDlg, SW_SHOW);
 }
@@ -642,10 +653,7 @@ static void DoReplaceOne(void)
     GetWindowTextW(g_hwndEdit, buf, len + 1);
 
     for (i = 0; i < selLen && match; i++) {
-        wchar_t c1 = buf[selStart + i], c2 = g_findText[i];
-        if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-        if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-        if (c1 != c2) match = 0;
+        if (!CharsMatch(buf[selStart + i], g_findText[i])) match = 0;
     }
     LocalFree(buf);
 
@@ -676,10 +684,7 @@ static int DoReplaceAll(void)
     /* Count matches */
     for (i = 0; i <= len - findLen; i++) {
         for (j = 0; j < findLen; j++) {
-            wchar_t c1 = buf[i + j], c2 = g_findText[j];
-            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-            if (c1 != c2) break;
+            if (!CharsMatch(buf[i + j], g_findText[j])) break;
         }
         if (j == findLen) count++;
     }
@@ -697,10 +702,7 @@ static int DoReplaceAll(void)
     for (i = 0; i <= len; i++) {
         if (i <= len - findLen) {
             for (j = 0; j < findLen; j++) {
-                wchar_t c1 = buf[i + j], c2 = g_findText[j];
-                if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
-                if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
-                if (c1 != c2) break;
+                if (!CharsMatch(buf[i + j], g_findText[j])) break;
             }
             if (j == findLen) {
                 for (j = 0; j < replLen; j++) *p++ = g_replaceText[j];
@@ -742,6 +744,8 @@ static LRESULT CALLBACK ReplEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     return CallWindowProc(origProc, hwnd, msg, wParam, lParam);
 }
 
+static HWND g_hwndReplCase = NULL;
+
 static LRESULT CALLBACK ReplaceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -756,15 +760,19 @@ static LRESULT CALLBACK ReplaceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         g_hwndReplWith = CreateWindowW(L"EDIT", g_replaceText,
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
             55, 30, 175, 20, hwnd, (HMENU)102, g_hInst, NULL);
+        g_hwndReplCase = CreateWindowW(L"BUTTON", L"Match case",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            130, 58, 85, 18, hwnd, (HMENU)103, g_hInst, NULL);
+        SendMessage(g_hwndReplCase, BM_SETCHECK, g_bMatchCase, 0);
         CreateWindowW(L"BUTTON", L"Find",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            5, 58, 55, 22, hwnd, (HMENU)ID_REPL_FIND, g_hInst, NULL);
+            5, 80, 55, 22, hwnd, (HMENU)ID_REPL_FIND, g_hInst, NULL);
         CreateWindowW(L"BUTTON", L"Replace",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            65, 58, 60, 22, hwnd, (HMENU)ID_REPL_REPLACE, g_hInst, NULL);
+            65, 80, 60, 22, hwnd, (HMENU)ID_REPL_REPLACE, g_hInst, NULL);
         CreateWindowW(L"BUTTON", L"All",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            175, 58, 55, 22, hwnd, (HMENU)ID_REPL_ALL, g_hInst, NULL);
+            175, 80, 55, 22, hwnd, (HMENU)ID_REPL_ALL, g_hInst, NULL);
         g_pfnReplFindProc = (WNDPROC)SetWindowLong(g_hwndReplFind, GWL_WNDPROC, (LONG)ReplEditProc);
         g_pfnReplWithProc = (WNDPROC)SetWindowLong(g_hwndReplWith, GWL_WNDPROC, (LONG)ReplEditProc);
         SetFocus(g_hwndReplFind);
@@ -774,6 +782,7 @@ static LRESULT CALLBACK ReplaceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     case WM_COMMAND:
         GetWindowTextW(g_hwndReplFind, g_findText, 128);
         GetWindowTextW(g_hwndReplWith, g_replaceText, 128);
+        g_bMatchCase = (int)SendMessage(g_hwndReplCase, BM_GETCHECK, 0, 0);
         if (LOWORD(wParam) == ID_REPL_FIND) {
             if (g_findText[0]) DoFindNext();
         } else if (LOWORD(wParam) == ID_REPL_REPLACE) {
@@ -789,6 +798,7 @@ static LRESULT CALLBACK ReplaceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         return 0;
 
     case WM_CLOSE:
+        g_bMatchCase = (int)SendMessage(g_hwndReplCase, BM_GETCHECK, 0, 0);
         DestroyWindow(hwnd);
         g_hwndReplaceDlg = NULL;
         SetFocus(g_hwndEdit);
@@ -821,7 +831,7 @@ static void DoReplace(void)
     GetWindowRect(g_hwndMain, &rc);
     g_hwndReplaceDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverReplace", L"Replace",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        rc.left + 20, rc.top + 50, 240, 108,
+        rc.left + 20, rc.top + 50, 240, 130,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndReplaceDlg, SW_SHOW);
 }
