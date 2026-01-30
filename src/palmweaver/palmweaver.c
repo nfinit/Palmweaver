@@ -33,7 +33,7 @@ static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
 int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
-static int g_lineNumWidth = 30;
+static int g_lineNumWidth = 20;
 
 /* Edit control subclass */
 static WNDPROC g_pfnEditProc = NULL;
@@ -881,12 +881,13 @@ static void UpdateLineNumbers(void)
             wsprintfW(numBuf, L"%d", logicalTotal);
             GetTextExtentPoint32W(hdc, numBuf, lstrlenW(numBuf), &sz);
             newWidth = sz.cx + 10;
-            if (newWidth < 25) newWidth = 25;
+            if (newWidth < 20) newWidth = 20;
             SelectObject(hdc, hOld);
             ReleaseDC(g_hwndLineNum, hdc);
             if (newWidth != g_lineNumWidth) {
                 g_lineNumWidth = newWidth;
                 SendMessage(g_hwndMain, WM_SIZE, 0, 0);
+                UpdateWindow(g_hwndMain);
             }
         }
     }
@@ -972,6 +973,7 @@ static void DoFileNew(void)
     g_szFilePath[0] = 0;
     g_bDirty = 0;
     UpdateTitle();
+    UpdateLineNumbers();
 }
 
 /*
@@ -1039,6 +1041,7 @@ static int DoFileOpen(void)
     lstrcpyW(g_szFilePath, szFile);
     g_bDirty = 0;
     UpdateTitle();
+    UpdateLineNumbers();
     return 1;
 }
 
