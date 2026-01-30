@@ -34,6 +34,8 @@ static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
 int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
+int g_bShowStatusBar = 1; /* Status bar on by default */
+int g_bFullScreen = 0;    /* Full screen off by default */
 static int g_lineNumWidth = 20;
 
 /* Tab settings */
@@ -103,6 +105,18 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         /* Alt+X = Exit */
         if ((wParam == 'X' || wParam == 'x') && alt) {
             SendMessage(g_hwndMain, WM_CLOSE, 0, 0);
+            return 1;
+        }
+        /* Alt+Enter = Full Screen */
+        if (wParam == VK_RETURN && alt) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_FULLSCREEN, 0);
+            return 1;
+        }
+    }
+    if (msg == WM_KEYDOWN) {
+        /* Escape exits full screen */
+        if (wParam == VK_ESCAPE && g_bFullScreen) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_FULLSCREEN, 0);
             return 1;
         }
     }
@@ -286,6 +300,8 @@ static void CreateMenuBar(HWND hwndCB)
     /* View menu */
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers");
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar");
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_FULLSCREEN, L"&Full Screen\tAlt+Enter");
     g_hViewMenu = hMenuView;
 
     /* Help menu */
@@ -319,12 +335,12 @@ static void OnSize(HWND hwnd, int cx, int cy)
         cy = rcClient.bottom;
     }
 
-    cbHeight = CommandBar_Height(g_hwndCB);
+    cbHeight = g_bFullScreen ? 0 : CommandBar_Height(g_hwndCB);
 
     /* Let status bar auto-size, then get its height */
     SendMessageW(g_hwndStatus, WM_SIZE, 0, 0);
     GetWindowRect(g_hwndStatus, &rcStatus);
-    sbHeight = rcStatus.bottom - rcStatus.top;
+    sbHeight = (g_bShowStatusBar && !g_bFullScreen) ? (rcStatus.bottom - rcStatus.top) : 0;
 
     editHeight = cy - cbHeight - sbHeight;
     editLeft = g_bShowLineNums ? g_lineNumWidth : 0;
@@ -1382,11 +1398,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bWordWrap ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_LINENUMS,
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
+                g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
             UpdateRecentMenu();
 
             /* Create Status bar */
             g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
-                WS_CHILD | WS_VISIBLE,
+                WS_CHILD | (g_bShowStatusBar ? WS_VISIBLE : 0),
                 0, 0, 0, 0, hwnd, (HMENU)ID_STATUSBAR, g_hInst, NULL);
 
             /* Create monospace font */
@@ -1542,6 +1560,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SendMessage(hwnd, WM_SIZE, 0, 0);
             if (g_bShowLineNums) UpdateLineNumbers();
             SetFocus(g_hwndEdit);
+            return 0;
+
+        case IDM_VIEW_STATUSBAR:
+            g_bShowStatusBar = !g_bShowStatusBar;
+            ShowWindow(g_hwndStatus, g_bShowStatusBar ? SW_SHOW : SW_HIDE);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
+                g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
+            SendMessage(hwnd, WM_SIZE, 0, 0);
+            return 0;
+
+        case IDM_VIEW_FULLSCREEN:
+            g_bFullScreen = !g_bFullScreen;
+            ShowWindow(g_hwndStatus, g_bFullScreen ? SW_HIDE : (g_bShowStatusBar ? SW_SHOW : SW_HIDE));
+            ShowWindow(g_hwndCB, g_bFullScreen ? SW_HIDE : SW_SHOW);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_FULLSCREEN,
+                g_bFullScreen ? MF_CHECKED : MF_UNCHECKED);
+            SendMessage(hwnd, WM_SIZE, 0, 0);
             return 0;
 
         case IDM_HELP_ABOUT:
