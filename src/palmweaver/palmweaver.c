@@ -27,6 +27,7 @@ HWND g_hwndLineNum;
 HFONT g_hFont;
 HBRUSH g_hBrushWhite;
 HMENU g_hViewMenu;
+HMENU g_hRecentMenu;
 
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
@@ -34,6 +35,10 @@ static int g_bDirty = 0;
 int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 static int g_lineNumWidth = 20;
+
+/* Recent files */
+wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH] = {0};
+int g_recentCount = 0;
 
 /* Edit control subclass */
 static WNDPROC g_pfnEditProc = NULL;
@@ -66,6 +71,9 @@ static void DoFind(void);
 static void DoFindNext(void);
 static void DoReplace(void);
 static void UpdateLineNumbers(void);
+static void AddRecentFile(const wchar_t *path);
+static void UpdateRecentMenu(void);
+static void OpenRecentFile(int index);
 
 /* External: file picker */
 int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
@@ -230,10 +238,12 @@ static void CreateMenuBar(HWND hwndCB)
     hMenuEdit = CreatePopupMenu();
     hMenuView = CreatePopupMenu();
     hMenuHelp = CreatePopupMenu();
+    g_hRecentMenu = CreatePopupMenu();
 
     /* File menu */
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_NEW, L"&New\tCtrl+N");
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_OPEN, L"&Open...\tCtrl+O");
+    AppendMenuW(hMenuFile, MF_POPUP, (UINT)g_hRecentMenu, L"&Recent Files");
     AppendMenuW(hMenuFile, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVE, L"&Save\tCtrl+S");
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVEAS, L"Save &As...");
@@ -927,6 +937,108 @@ static void UpdateLineNumbers(void)
 }
 
 /*
+ * Recent files management
+ */
+static void AddRecentFile(const wchar_t *path)
+{
+    int i, j;
+    /* Check if already in list, move to top if so */
+    for (i = 0; i < g_recentCount; i++) {
+        if (lstrcmpiW(g_recentFiles[i], path) == 0) {
+            for (j = i; j > 0; j--)
+                lstrcpyW(g_recentFiles[j], g_recentFiles[j-1]);
+            lstrcpyW(g_recentFiles[0], path);
+            UpdateRecentMenu();
+            return;
+        }
+    }
+    /* Shift down and add at top */
+    for (i = MAX_RECENT_FILES - 1; i > 0; i--)
+        lstrcpyW(g_recentFiles[i], g_recentFiles[i-1]);
+    lstrcpyW(g_recentFiles[0], path);
+    if (g_recentCount < MAX_RECENT_FILES) g_recentCount++;
+    UpdateRecentMenu();
+}
+
+static void UpdateRecentMenu(void)
+{
+    int i, j;
+    if (!g_hRecentMenu) return;
+
+    while (RemoveMenu(g_hRecentMenu, 0, MF_BYPOSITION));
+
+    if (g_recentCount == 0) {
+        AppendMenuW(g_hRecentMenu, MF_STRING | MF_GRAYED, 0, L"(none)");
+    } else {
+        for (i = 0; i < g_recentCount; i++) {
+            wchar_t item[MAX_PATH + 8];
+            const wchar_t *name = g_recentFiles[i];
+            int len = lstrlenW(name);
+            for (j = len - 1; j >= 0; j--)
+                if (name[j] == '\\') { name = &g_recentFiles[i][j+1]; break; }
+            wsprintfW(item, L"&%d %s", i + 1, name);
+            AppendMenuW(g_hRecentMenu, MF_STRING, IDM_RECENT_BASE + i, item);
+        }
+    }
+}
+
+static void OpenRecentFile(int index)
+{
+    wchar_t path[MAX_PATH];
+    HANDLE hFile;
+    DWORD dwSize, dwRead;
+    char *pBuf;
+    wchar_t *pWBuf;
+    int i;
+
+    if (index < 0 || index >= g_recentCount) return;
+    if (!PromptSave()) return;
+
+    lstrcpyW(path, g_recentFiles[index]);
+
+    hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBoxW(g_hwndMain, L"Cannot open file.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    dwSize = GetFileSize(hFile, NULL);
+    pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 1);
+    if (!pBuf) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
+    CloseHandle(hFile);
+    pBuf[dwRead] = 0;
+
+    if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
+        wchar_t *pWide = (wchar_t *)(pBuf + 2);
+        int nChars = (dwRead - 2) / sizeof(wchar_t);
+        pWide[nChars] = 0;
+        SetWindowTextW(g_hwndEdit, pWide);
+    } else {
+        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwRead + 1) * sizeof(wchar_t));
+        if (pWBuf) {
+            for (i = 0; i < (int)dwRead; i++)
+                pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
+            pWBuf[dwRead] = 0;
+            SetWindowTextW(g_hwndEdit, pWBuf);
+            LocalFree(pWBuf);
+        }
+    }
+
+    LocalFree(pBuf);
+    lstrcpyW(g_szFilePath, path);
+    g_bDirty = 0;
+    UpdateTitle();
+    UpdateLineNumbers();
+    AddRecentFile(path);
+}
+
+/*
  * UpdateStatus - Update status bar with cursor position
  */
 static void UpdateStatus(void)
@@ -1052,6 +1164,7 @@ static int DoFileOpen(void)
     g_bDirty = 0;
     UpdateTitle();
     UpdateLineNumbers();
+    AddRecentFile(szFile);
     return 1;
 }
 
@@ -1118,7 +1231,11 @@ static int DoFileSaveAs(void)
     }
 
     lstrcpyW(g_szFilePath, szFile);
-    return DoFileSave();
+    if (DoFileSave()) {
+        AddRecentFile(szFile);
+        return 1;
+    }
+    return 0;
 }
 
 /*
@@ -1148,6 +1265,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bWordWrap ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_LINENUMS,
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
+            UpdateRecentMenu();
 
             /* Create Status bar */
             g_hwndStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
@@ -1229,6 +1347,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 DestroyWindow(hwnd);
             }
             return 0;
+
+        default:
+            /* Handle recent files menu */
+            if (LOWORD(wParam) >= IDM_RECENT_BASE && 
+                LOWORD(wParam) < IDM_RECENT_BASE + MAX_RECENT_FILES) {
+                OpenRecentFile(LOWORD(wParam) - IDM_RECENT_BASE);
+                return 0;
+            }
+            break;
 
         case IDM_EDIT_UNDO:
             SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
