@@ -892,16 +892,52 @@ static HWND g_hwndOptTabSize = NULL;
 #define IDC_OPT_USESPACES 102
 #define IDC_OPT_TABSIZE   103
 #define IDC_OPT_CLEARREG  104
+#define IDC_OPT_FONTSIZE  105
+#define IDC_OPT_FIXEDFONT 106
 
 /* External: settings */
 void ClearSettings(void);
 
+/*
+ * Font settings
+ */
+static int g_fontSizes[] = {10, 12, 14, 16};
+static int g_fontSizeIdx = 2;  /* Default 14 */
+static int g_bFixedFont = 1;   /* Default fixed (Courier New) */
+
+static void UpdateFont(void)
+{
+    LOGFONTW lf = {0};
+    HFONT hNewFont;
+
+    lf.lfHeight = g_fontSizes[g_fontSizeIdx];
+    if (g_bFixedFont) {
+        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+        lstrcpyW(lf.lfFaceName, L"Courier New");
+    } else {
+        lf.lfPitchAndFamily = VARIABLE_PITCH | FF_SWISS;
+        lstrcpyW(lf.lfFaceName, L"Tahoma");
+    }
+
+    hNewFont = CreateFontIndirectW(&lf);
+    if (hNewFont) {
+        DeleteObject(g_hFont);
+        g_hFont = hNewFont;
+        SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        SendMessage(g_hwndLineNum, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        UpdateLineNumbers();
+    }
+}
+
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    static HWND hwndFontSize, hwndFixedFont;
+
     switch (msg) {
     case WM_CREATE:
         {
             wchar_t buf[8];
+            /* Row 1: Indentation */
             CreateWindowW(L"STATIC", L"Indentation:",
                 WS_CHILD | WS_VISIBLE, 10, 12, 70, 16, hwnd, NULL, g_hInst, NULL);
             g_hwndOptUseTabs = CreateWindowW(L"BUTTON", L"Tabs",
@@ -914,12 +950,30 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             g_hwndOptTabSize = CreateWindowW(L"EDIT", buf,
                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
                 202, 10, 25, 20, hwnd, (HMENU)IDC_OPT_TABSIZE, g_hInst, NULL);
+
+            /* Row 2: Font */
+            CreateWindowW(L"STATIC", L"Font size:",
+                WS_CHILD | WS_VISIBLE, 10, 40, 55, 16, hwnd, NULL, g_hInst, NULL);
+            hwndFontSize = CreateWindowW(L"COMBOBOX", NULL,
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                70, 37, 50, 80, hwnd, (HMENU)IDC_OPT_FONTSIZE, g_hInst, NULL);
+            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"10");
+            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"12");
+            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"14");
+            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"16");
+            SendMessageW(hwndFontSize, CB_SETCURSEL, g_fontSizeIdx, 0);
+            hwndFixedFont = CreateWindowW(L"BUTTON", L"Fixed width font",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                130, 38, 100, 20, hwnd, (HMENU)IDC_OPT_FIXEDFONT, g_hInst, NULL);
+            SendMessage(hwndFixedFont, BM_SETCHECK, g_bFixedFont, 0);
+
+            /* Row 3: Buttons */
             CreateWindowW(L"BUTTON", L"Clear Settings",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                10, 40, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+                10, 68, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
             CreateWindowW(L"BUTTON", L"OK",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                180, 40, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
+                180, 68, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
         }
         return 0;
@@ -927,12 +981,21 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
             wchar_t buf[8];
-            int size;
+            int size, newSizeIdx, newFixed;
             g_bUseTabs = (int)SendMessage(g_hwndOptUseTabs, BM_GETCHECK, 0, 0);
             GetWindowTextW(g_hwndOptTabSize, buf, 8);
             size = 0;
             { int i; for (i = 0; buf[i]; i++) size = size * 10 + (buf[i] - '0'); }
             if (size >= 1 && size <= 8) g_nTabSize = size;
+
+            newSizeIdx = (int)SendMessageW(hwndFontSize, CB_GETCURSEL, 0, 0);
+            newFixed = (int)SendMessage(hwndFixedFont, BM_GETCHECK, 0, 0);
+            if (newSizeIdx != g_fontSizeIdx || newFixed != g_bFixedFont) {
+                g_fontSizeIdx = newSizeIdx;
+                g_bFixedFont = newFixed;
+                UpdateFont();
+            }
+
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
             SetFocus(g_hwndEdit);
@@ -974,7 +1037,7 @@ static void DoOptions(void)
     GetWindowRect(g_hwndMain, &rc);
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        rc.left + 30, rc.top + 60, 245, 92,
+        rc.left + 30, rc.top + 60, 245, 120,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
