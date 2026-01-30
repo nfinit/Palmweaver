@@ -134,6 +134,8 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'G') { DoGotoLine(); return 1; }
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
+        if (wParam == 'L') { SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_LINENUMS, 0); return 1; }
+        if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
         /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
         if (wParam == VK_ADD || wParam == 0xBB) {  /* Numpad+ or =/+ key */
@@ -173,10 +175,14 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
-        if (wParam == 6 || wParam == 7 || wParam == 8 || /* Ctrl+F, G, H */
+        if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || wParam == 12 || /* Ctrl+A, F, G, H, L */
             wParam == 14 || wParam == 15 || wParam == 19 || wParam == 23) /* Ctrl+N, O, S, W */
             return 0;
     }
+
+    /* Block WM_SYSCHAR for Alt+Enter (prevents beep) */
+    if (msg == WM_SYSCHAR && wParam == VK_RETURN)
+        return 0;
 
     /* Sync line numbers on scroll */
     if (msg == WM_VSCROLL) {

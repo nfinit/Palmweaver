@@ -81,6 +81,7 @@ static void GetCurrentFilterExt(wchar_t *ext, int maxLen)
 static void PopulateFilterCombo(const wchar_t *filter)
 {
     const wchar_t *p = filter;
+    int hasAllFiles = 0;
 
     if (!filter || !g_hwndFilter) return;
 
@@ -92,11 +93,14 @@ static void PopulateFilterCombo(const wchar_t *filter)
         p++;
         if (!*p) break;
         SendMessageW(g_hwndFilter, CB_ADDSTRING, 0, (LPARAM)p);
+        if (p[0] == '*' && p[1] == '.' && p[2] == '*' && p[3] == 0)
+            hasAllFiles = 1;
         while (*p) p++;
         p++;
     }
 
-    SendMessageW(g_hwndFilter, CB_ADDSTRING, 0, (LPARAM)L"*.*");
+    if (!hasAllFiles)
+        SendMessageW(g_hwndFilter, CB_ADDSTRING, 0, (LPARAM)L"*.*");
     SendMessageW(g_hwndFilter, CB_SETCURSEL, 0, 0);
 }
 
