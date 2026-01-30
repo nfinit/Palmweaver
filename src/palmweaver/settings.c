@@ -10,6 +10,8 @@
 /* Settings - declared extern in palmweaver.c */
 extern int g_bWordWrap;
 extern int g_bShowLineNums;
+extern int g_bUseTabs;
+extern int g_nTabSize;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
 extern int g_recentCount;
 
@@ -33,6 +35,14 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"ShowLineNums", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bShowLineNums = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"UseTabs", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bUseTabs = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"TabSize", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_nTabSize = (int)val;
 
     /* Load recent files */
     g_recentCount = 0;
@@ -67,6 +77,12 @@ void SaveSettings(void)
     val = (DWORD)g_bShowLineNums;
     RegSetValueExW(hKey, L"ShowLineNums", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
+    val = (DWORD)g_bUseTabs;
+    RegSetValueExW(hKey, L"UseTabs", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
+    val = (DWORD)g_nTabSize;
+    RegSetValueExW(hKey, L"TabSize", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
     /* Save recent files */
     for (i = 0; i < MAX_RECENT_FILES; i++) {
         wsprintfW(name, L"Recent%d", i);
@@ -77,4 +93,25 @@ void SaveSettings(void)
     }
 
     RegCloseKey(hKey);
+}
+
+/*
+ * ClearSettings - Delete all registry settings
+ */
+void ClearSettings(void)
+{
+    HKEY hKey;
+    wchar_t name[256];
+    DWORD nameLen;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, 0, &hKey) == ERROR_SUCCESS) {
+        while (1) {
+            nameLen = 256;
+            if (RegEnumValueW(hKey, 0, name, &nameLen, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                break;
+            RegDeleteValueW(hKey, name);
+        }
+        RegCloseKey(hKey);
+    }
+    RegDeleteKeyW(HKEY_CURRENT_USER, REG_KEY);
 }

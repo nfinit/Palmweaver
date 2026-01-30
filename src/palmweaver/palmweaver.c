@@ -36,6 +36,10 @@ int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 static int g_lineNumWidth = 20;
 
+/* Tab settings */
+int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
+int g_nTabSize = 4;    /* Number of spaces per tab */
+
 /* Recent files */
 wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH] = {0};
 int g_recentCount = 0;
@@ -74,6 +78,7 @@ static void UpdateLineNumbers(void);
 static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
 static void OpenRecentFile(int index);
+static void DoOptions(void);
 
 /* External: file picker */
 int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
@@ -125,6 +130,16 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     /* Global shortcuts first */
     if (HandleGlobalKeys(msg, wParam))
         return 0;
+
+    /* Handle Tab key - insert spaces if configured */
+    if (msg == WM_CHAR && wParam == '\t' && !g_bUseTabs) {
+        wchar_t spaces[9];
+        int i;
+        for (i = 0; i < g_nTabSize && i < 8; i++) spaces[i] = ' ';
+        spaces[i] = 0;
+        SendMessageW(hwnd, EM_REPLACESEL, TRUE, (LPARAM)spaces);
+        return 0;
+    }
 
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
@@ -247,6 +262,8 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuFile, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVE, L"&Save\tCtrl+S");
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_SAVEAS, L"Save &As...");
+    AppendMenuW(hMenuFile, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_OPTIONS, L"&Options...");
     AppendMenuW(hMenuFile, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tCtrl+W");
 
@@ -847,6 +864,105 @@ static void DoReplace(void)
 }
 
 /*
+ * Options dialog
+ */
+static HWND g_hwndOptionsDlg = NULL;
+static HWND g_hwndOptUseTabs = NULL;
+static HWND g_hwndOptUseSpaces = NULL;
+static HWND g_hwndOptTabSize = NULL;
+
+#define IDC_OPT_USETABS   101
+#define IDC_OPT_USESPACES 102
+#define IDC_OPT_TABSIZE   103
+#define IDC_OPT_CLEARREG  104
+
+/* External: settings */
+void ClearSettings(void);
+
+static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE:
+        {
+            wchar_t buf[8];
+            CreateWindowW(L"STATIC", L"Indentation:",
+                WS_CHILD | WS_VISIBLE, 10, 12, 70, 16, hwnd, NULL, g_hInst, NULL);
+            g_hwndOptUseTabs = CreateWindowW(L"BUTTON", L"Tabs",
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                85, 10, 50, 20, hwnd, (HMENU)IDC_OPT_USETABS, g_hInst, NULL);
+            g_hwndOptUseSpaces = CreateWindowW(L"BUTTON", L"Spaces:",
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                140, 10, 60, 20, hwnd, (HMENU)IDC_OPT_USESPACES, g_hInst, NULL);
+            wsprintfW(buf, L"%d", g_nTabSize);
+            g_hwndOptTabSize = CreateWindowW(L"EDIT", buf,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                202, 10, 25, 20, hwnd, (HMENU)IDC_OPT_TABSIZE, g_hInst, NULL);
+            CreateWindowW(L"BUTTON", L"Clear Settings",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                10, 40, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+            CreateWindowW(L"BUTTON", L"OK",
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                180, 40, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
+            SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
+        }
+        return 0;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            wchar_t buf[8];
+            int size;
+            g_bUseTabs = (int)SendMessage(g_hwndOptUseTabs, BM_GETCHECK, 0, 0);
+            GetWindowTextW(g_hwndOptTabSize, buf, 8);
+            size = 0;
+            { int i; for (i = 0; buf[i]; i++) size = size * 10 + (buf[i] - '0'); }
+            if (size >= 1 && size <= 8) g_nTabSize = size;
+            DestroyWindow(hwnd);
+            g_hwndOptionsDlg = NULL;
+            SetFocus(g_hwndEdit);
+        } else if (LOWORD(wParam) == IDC_OPT_CLEARREG) {
+            if (MessageBoxW(hwnd, L"Clear all settings and recent files?",
+                    L"Clear Settings", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                ClearSettings();
+                MessageBoxW(hwnd, L"Settings cleared. Changes take effect on restart.",
+                    L"Clear Settings", MB_OK);
+            }
+        }
+        return 0;
+
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        g_hwndOptionsDlg = NULL;
+        SetFocus(g_hwndEdit);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static void DoOptions(void)
+{
+    WNDCLASSW wc = {0};
+    RECT rc;
+
+    if (g_hwndOptionsDlg) {
+        SetFocus(g_hwndOptionsDlg);
+        return;
+    }
+
+    wc.lpfnWndProc = OptionsWndProc;
+    wc.hInstance = g_hInst;
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"PalmweaverOptions";
+    RegisterClassW(&wc);
+
+    GetWindowRect(g_hwndMain, &rc);
+    g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        rc.left + 30, rc.top + 60, 245, 92,
+        g_hwndMain, NULL, g_hInst, NULL);
+    ShowWindow(g_hwndOptionsDlg, SW_SHOW);
+}
+
+/*
  * Line number gutter
  */
 static LRESULT CALLBACK LineNumProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1340,6 +1456,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_FILE_SAVEAS:
             DoFileSaveAs();
+            return 0;
+
+        case IDM_FILE_OPTIONS:
+            DoOptions();
             return 0;
 
         case IDM_FILE_EXIT:
