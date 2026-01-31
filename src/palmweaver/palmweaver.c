@@ -32,6 +32,7 @@ HWND g_hwndLineNum;
 HFONT g_hFont;
 HBRUSH g_hBrushBg;
 HMENU g_hViewMenu;
+HMENU g_hThemeMenu;
 HMENU g_hRecentMenu;
 
 /* Current file state */
@@ -313,6 +314,7 @@ static void CreateMenuBar(HWND hwndCB)
     HMENU hMenuEdit;
     HMENU hMenuView;
     HMENU hMenuHelp;
+    HMENU hMenuTheme;
 
     hMenu = CreateMenu();
     hMenuFile = CreatePopupMenu();
@@ -353,11 +355,18 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar");
     AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_THEME_DEFAULT, L"Theme: &Default");
-    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_THEME_GREEN, L"Theme: &Green");
-    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_THEME_AMBER, L"Theme: &Amber");
-    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_THEME_BLUE, L"Theme: &Blue");
-    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\tAlt+I");
+
+    /* Theme submenu */
+    hMenuTheme = CreatePopupMenu();
+    AppendMenuW(hMenuTheme, MF_STRING | MF_CHECKED, IDM_VIEW_THEME_DEFAULT, L"&Default");
+    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_GREEN, L"&Green");
+    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_AMBER, L"&Amber");
+    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_BLUE, L"&Blue");
+    AppendMenuW(hMenuTheme, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\tAlt+I");
+    AppendMenuW(hMenuView, MF_POPUP, (UINT)hMenuTheme, L"&Theme");
+    g_hThemeMenu = hMenuTheme;
+
     AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_FULLSCREEN, L"&Full Screen\tAlt+Enter");
     g_hViewMenu = hMenuView;
@@ -1538,10 +1547,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
                 g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
+            CheckMenuItem(g_hThemeMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT, MF_UNCHECKED);
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
+            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT, MF_UNCHECKED);
+            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
             UpdateRecentMenu();
 
             /* Create Status bar */
@@ -1716,15 +1725,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_VIEW_THEME_GREEN:
         case IDM_VIEW_THEME_AMBER:
         case IDM_VIEW_THEME_BLUE:
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_UNCHECKED);
+            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_UNCHECKED);
             g_nTheme = LOWORD(wParam) - IDM_VIEW_THEME_DEFAULT;
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
+            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
             UpdateTheme();
             return 0;
 
         case IDM_VIEW_INVERSE:
             g_bInverseColors = !g_bInverseColors;
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
+            CheckMenuItem(g_hThemeMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
             UpdateTheme();
             return 0;
