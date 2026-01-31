@@ -166,6 +166,11 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
             SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_STATUSBAR, 0);
             return 1;
         }
+        /* Alt+W = Toggle Word Wrap */
+        if ((wParam == 'W' || wParam == 'w') && alt) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_WORDWRAP, 0);
+            return 1;
+        }
     }
     if (msg == WM_KEYDOWN) {
         /* Escape exits full screen */
@@ -245,10 +250,10 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
     }
 
-    /* Block WM_SYSCHAR for Alt+Enter, Alt+I, Alt+L, Alt+S, Alt+B (prevents beep) */
+    /* Block WM_SYSCHAR for Alt+Enter, Alt+I, Alt+L, Alt+S, Alt+B, Alt+W (prevents beep) */
     if (msg == WM_SYSCHAR && (wParam == VK_RETURN || wParam == 'i' || wParam == 'I' || 
         wParam == 'l' || wParam == 'L' || wParam == 's' || wParam == 'S' ||
-        wParam == 'b' || wParam == 'B'))
+        wParam == 'b' || wParam == 'B' || wParam == 'w' || wParam == 'W'))
         return 0;
 
     /* Sync line numbers on scroll */
@@ -387,7 +392,7 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_GOTOLINE, L"&Go to Line...\tCtrl+G");
 
     /* View menu */
-    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap\tAlt+W");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers\tAlt+L");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar\tAlt+B");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_SCROLLBARS, L"Scro&llbars\tAlt+S");
@@ -1152,7 +1157,6 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 static void DoOptions(void)
 {
     WNDCLASSW wc = {0};
-    RECT rc;
 
     if (g_hwndOptionsDlg) {
         SetFocus(g_hwndOptionsDlg);
@@ -1165,10 +1169,9 @@ static void DoOptions(void)
     wc.lpszClassName = L"PalmweaverOptions";
     RegisterClassW(&wc);
 
-    GetWindowRect(g_hwndMain, &rc);
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        rc.left + 30, rc.top + 60, 260, 172,
+        30, 25, 260, 172,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
