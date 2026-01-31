@@ -17,6 +17,7 @@ extern int g_bShowStatusBar;
 extern int g_bInverseColors;
 extern int g_nTheme;
 extern int g_bThemedSelection;
+extern int g_bShowScrollbars;
 extern int g_bUseTabs;
 extern int g_nTabSize;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
@@ -58,6 +59,10 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"ThemedSelection", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bThemedSelection = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"ShowScrollbars", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bShowScrollbars = (int)val;
 
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"UseTabs", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
@@ -116,6 +121,9 @@ void SaveSettings(void)
     val = (DWORD)g_bThemedSelection;
     RegSetValueExW(hKey, L"ThemedSelection", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
+    val = (DWORD)g_bShowScrollbars;
+    RegSetValueExW(hKey, L"ShowScrollbars", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
     val = (DWORD)g_bUseTabs;
     RegSetValueExW(hKey, L"UseTabs", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
@@ -161,6 +169,7 @@ void ClearSettings(void)
     g_bInverseColors = 0;
     g_nTheme = 0;
     g_bThemedSelection = 0;
+    g_bShowScrollbars = 1;
     g_bUseTabs = 1;
     g_nTabSize = 4;
     g_recentCount = 0;

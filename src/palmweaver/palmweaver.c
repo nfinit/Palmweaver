@@ -45,6 +45,7 @@ int g_bFullScreen = 0;    /* Full screen off by default */
 int g_bInverseColors = 0; /* Inverse fg/bg of current theme */
 int g_nTheme = 0;         /* Color theme: 0=default, 1=green, 2=amber, 3=blue */
 int g_bThemedSelection = 0; /* Theme selection highlight colors (opt-in) */
+int g_bShowScrollbars = 1;  /* Scrollbars on by default */
 static int g_lineNumWidth = 20;
 
 /* Theme colors: {foreground, background} */
@@ -148,6 +149,21 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
             SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_INVERSE, 0);
             return 1;
         }
+        /* Alt+L = Toggle Line Numbers */
+        if ((wParam == 'L' || wParam == 'l') && alt) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_LINENUMS, 0);
+            return 1;
+        }
+        /* Alt+S = Toggle Scrollbars */
+        if ((wParam == 'S' || wParam == 's') && alt) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_SCROLLBARS, 0);
+            return 1;
+        }
+        /* Alt+B = Toggle Status Bar */
+        if ((wParam == 'B' || wParam == 'b') && alt) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_STATUSBAR, 0);
+            return 1;
+        }
     }
     if (msg == WM_KEYDOWN) {
         /* Escape exits full screen */
@@ -164,7 +180,6 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'G') { DoGotoLine(); return 1; }
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
-        if (wParam == 'L') { SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_LINENUMS, 0); return 1; }
         if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
         /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
@@ -223,13 +238,15 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
-        if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || wParam == 12 || /* Ctrl+A, F, G, H, L */
+        if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || /* Ctrl+A, F, G, H */
             wParam == 14 || wParam == 15 || wParam == 19 || wParam == 23) /* Ctrl+N, O, S, W */
             return 0;
     }
 
-    /* Block WM_SYSCHAR for Alt+Enter and Alt+I (prevents beep) */
-    if (msg == WM_SYSCHAR && (wParam == VK_RETURN || wParam == 'i' || wParam == 'I'))
+    /* Block WM_SYSCHAR for Alt+Enter, Alt+I, Alt+L, Alt+S, Alt+B (prevents beep) */
+    if (msg == WM_SYSCHAR && (wParam == VK_RETURN || wParam == 'i' || wParam == 'I' || 
+        wParam == 'l' || wParam == 'L' || wParam == 's' || wParam == 'S' ||
+        wParam == 'b' || wParam == 'B'))
         return 0;
 
     /* Sync line numbers on scroll */
@@ -369,8 +386,9 @@ static void CreateMenuBar(HWND hwndCB)
 
     /* View menu */
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
-    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers");
-    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar");
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers\tAlt+L");
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar\tAlt+B");
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_SCROLLBARS, L"Scro&llbars\tAlt+S");
     AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
 
     /* Theme submenu */
@@ -1637,6 +1655,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
                 g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_SCROLLBARS,
+                g_bShowScrollbars ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hThemeMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT, MF_UNCHECKED);
@@ -1666,10 +1686,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_pfnLineNumProc = (WNDPROC)SetWindowLong(g_hwndLineNum, GWL_WNDPROC,
                 (LONG)LineNumProc);
 
-            /* Create Edit control - style depends on word wrap setting */
-            editStyle = WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL;
+            /* Create Edit control - style depends on word wrap and scrollbar settings */
+            editStyle = WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL;
+            if (g_bShowScrollbars) {
+                editStyle |= WS_VSCROLL;
+                if (!g_bWordWrap) editStyle |= WS_HSCROLL;
+            }
             if (!g_bWordWrap)
-                editStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
+                editStyle |= ES_AUTOHSCROLL;
 
             g_hwndEdit = CreateWindowW(
                 L"EDIT", NULL, editStyle,
@@ -1782,7 +1806,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     style &= ~(WS_HSCROLL | ES_AUTOHSCROLL);
                     CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP, MF_CHECKED);
                 } else {
-                    style |= WS_HSCROLL | ES_AUTOHSCROLL;
+                    style |= ES_AUTOHSCROLL;
+                    if (g_bShowScrollbars) style |= WS_HSCROLL;
                     CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP, MF_UNCHECKED);
                 }
                 SetWindowLong(g_hwndEdit, GWL_STYLE, style);
@@ -1809,6 +1834,24 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
                 g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
             SendMessage(hwnd, WM_SIZE, 0, 0);
+            return 0;
+
+        case IDM_VIEW_SCROLLBARS:
+            {
+                LONG style = GetWindowLong(g_hwndEdit, GWL_STYLE);
+                g_bShowScrollbars = !g_bShowScrollbars;
+                if (g_bShowScrollbars) {
+                    style |= WS_VSCROLL;
+                    if (!g_bWordWrap) style |= WS_HSCROLL;
+                } else {
+                    style &= ~(WS_VSCROLL | WS_HSCROLL);
+                }
+                SetWindowLong(g_hwndEdit, GWL_STYLE, style);
+                SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                CheckMenuItem(g_hViewMenu, IDM_VIEW_SCROLLBARS,
+                    g_bShowScrollbars ? MF_CHECKED : MF_UNCHECKED);
+            }
             return 0;
 
         case IDM_VIEW_THEME_DEFAULT:
