@@ -1201,6 +1201,9 @@ static void UpdateLineNumbers(void)
 {
     static wchar_t *cachedText = NULL;
     static int cachedLen = -1;
+    static int cachedFirstVisible = -1;
+    static int cachedVisLines = -1;
+    static wchar_t cachedOutput[4096] = {0};
     wchar_t buf[4096];
     wchar_t *text = NULL;
     int i, visLines, firstVisible, pos = 0, textLen;
@@ -1210,6 +1213,11 @@ static void UpdateLineNumbers(void)
 
     visLines = (int)SendMessage(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
     textLen = GetWindowTextLengthW(g_hwndEdit);
+    firstVisible = (int)SendMessage(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+
+    /* Quick exit if scroll position unchanged and line count same */
+    if (textLen == cachedLen && firstVisible == cachedFirstVisible && visLines == cachedVisLines)
+        return;
 
     /* Cache text for performance */
     if (textLen == cachedLen && cachedText) {
@@ -1223,6 +1231,9 @@ static void UpdateLineNumbers(void)
         }
         text = cachedText;
     }
+
+    cachedFirstVisible = firstVisible;
+    cachedVisLines = visLines;
 
     /* Auto-size gutter width based on line count */
     {
@@ -1251,8 +1262,6 @@ static void UpdateLineNumbers(void)
         }
     }
 
-    firstVisible = (int)SendMessage(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
-
     /* Find logical line number at first visible line */
     charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, firstVisible, 0);
     logicalLine = 1;
@@ -1272,7 +1281,12 @@ static void UpdateLineNumbers(void)
         }
     }
     buf[pos] = 0;
-    SetWindowTextW(g_hwndLineNum, buf);
+
+    /* Only update control if output changed */
+    if (lstrcmpW(buf, cachedOutput) != 0) {
+        lstrcpyW(cachedOutput, buf);
+        SetWindowTextW(g_hwndLineNum, buf);
+    }
 }
 
 /*
