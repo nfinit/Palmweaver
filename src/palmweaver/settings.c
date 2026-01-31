@@ -11,6 +11,7 @@
 extern int g_bWordWrap;
 extern int g_bShowLineNums;
 extern int g_bShowStatusBar;
+extern int g_bInverseColors;
 extern int g_bUseTabs;
 extern int g_nTabSize;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
@@ -40,6 +41,10 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"ShowStatusBar", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bShowStatusBar = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"InverseColors", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bInverseColors = (int)val;
 
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"UseTabs", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
@@ -84,6 +89,9 @@ void SaveSettings(void)
 
     val = (DWORD)g_bShowStatusBar;
     RegSetValueExW(hKey, L"ShowStatusBar", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
+    val = (DWORD)g_bInverseColors;
+    RegSetValueExW(hKey, L"InverseColors", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
     val = (DWORD)g_bUseTabs;
     RegSetValueExW(hKey, L"UseTabs", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));

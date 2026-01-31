@@ -26,6 +26,7 @@ HWND g_hwndStatus;
 HWND g_hwndLineNum;
 HFONT g_hFont;
 HBRUSH g_hBrushWhite;
+HBRUSH g_hBrushBlack;
 HMENU g_hViewMenu;
 HMENU g_hRecentMenu;
 
@@ -36,6 +37,7 @@ int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 int g_bShowStatusBar = 1; /* Status bar on by default */
 int g_bFullScreen = 0;    /* Full screen off by default */
+int g_bInverseColors = 0; /* Inverse (white on black) off by default */
 static int g_lineNumWidth = 20;
 
 /* Tab settings */
@@ -118,6 +120,11 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
             SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_FULLSCREEN, 0);
             return 1;
         }
+        /* Alt+I = Inverse Colors */
+        if ((wParam == 'I' || wParam == 'i') && alt) {
+            SendMessage(g_hwndMain, WM_COMMAND, IDM_VIEW_INVERSE, 0);
+            return 1;
+        }
     }
     if (msg == WM_KEYDOWN) {
         /* Escape exits full screen */
@@ -163,6 +170,14 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (HandleGlobalKeys(msg, wParam))
         return 0;
 
+    /* Fill background with correct color */
+    if (msg == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wParam, &rc, g_bInverseColors ? g_hBrushBlack : g_hBrushWhite);
+        return 1;
+    }
+
     /* Handle Tab key - insert spaces if configured */
     if (msg == WM_CHAR && wParam == '\t' && !g_bUseTabs) {
         wchar_t spaces[9];
@@ -180,8 +195,8 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
     }
 
-    /* Block WM_SYSCHAR for Alt+Enter (prevents beep) */
-    if (msg == WM_SYSCHAR && wParam == VK_RETURN)
+    /* Block WM_SYSCHAR for Alt+Enter and Alt+I (prevents beep) */
+    if (msg == WM_SYSCHAR && (wParam == VK_RETURN || wParam == 'i' || wParam == 'I'))
         return 0;
 
     /* Sync line numbers on scroll */
@@ -322,6 +337,7 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar");
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\\tAlt+I");
     AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_FULLSCREEN, L"&Full Screen\tAlt+Enter");
     g_hViewMenu = hMenuView;
 
@@ -1065,6 +1081,15 @@ static LRESULT CALLBACK LineNumProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     if (msg == WM_CHAR || msg == WM_KEYDOWN || msg == WM_LBUTTONDOWN ||
         msg == WM_RBUTTONDOWN || msg == WM_LBUTTONDBLCLK)
         return 0;
+
+    /* Fill background with correct color */
+    if (msg == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wParam, &rc, g_bInverseColors ? g_hBrushBlack : g_hBrushWhite);
+        return 1;
+    }
+
     return CallWindowProc(g_pfnLineNumProc, hwnd, msg, wParam, lParam);
 }
 
@@ -1464,6 +1489,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             /* Create white brush for edit backgrounds */
             g_hBrushWhite = CreateSolidBrush(RGB(255, 255, 255));
+            g_hBrushBlack = CreateSolidBrush(RGB(0, 0, 0));
 
             /* Create CommandBar */
             g_hwndCB = CommandBar_Create(g_hInst, hwnd, 1);
@@ -1477,6 +1503,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
                 g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
+                g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
             UpdateRecentMenu();
 
             /* Create Status bar */
@@ -1647,6 +1675,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SendMessage(hwnd, WM_SIZE, 0, 0);
             return 0;
 
+        case IDM_VIEW_INVERSE:
+            g_bInverseColors = !g_bInverseColors;
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
+                g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
+            InvalidateRect(g_hwndEdit, NULL, TRUE);
+            InvalidateRect(g_hwndLineNum, NULL, TRUE);
+            return 0;
+
         case IDM_VIEW_FULLSCREEN:
             g_bFullScreen = !g_bFullScreen;
             ShowWindow(g_hwndStatus, g_bFullScreen ? SW_HIDE : (g_bShowStatusBar ? SW_SHOW : SW_HIDE));
@@ -1677,14 +1713,22 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORSTATIC:
         if ((HWND)lParam == g_hwndLineNum || (HWND)lParam == g_hwndEdit) {
-            SetBkColor((HDC)wParam, RGB(255, 255, 255));
-            return (LRESULT)g_hBrushWhite;
+            if (g_bInverseColors) {
+                SetTextColor((HDC)wParam, RGB(255, 255, 255));
+                SetBkColor((HDC)wParam, RGB(0, 0, 0));
+                return (LRESULT)g_hBrushBlack;
+            } else {
+                SetTextColor((HDC)wParam, RGB(0, 0, 0));
+                SetBkColor((HDC)wParam, RGB(255, 255, 255));
+                return (LRESULT)g_hBrushWhite;
+            }
         }
         break;
 
     case WM_DESTROY:
         SaveSettings();
         if (g_hBrushWhite) DeleteObject(g_hBrushWhite);
+        if (g_hBrushBlack) DeleteObject(g_hBrushBlack);
         if (g_hFont) DeleteObject(g_hFont);
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
