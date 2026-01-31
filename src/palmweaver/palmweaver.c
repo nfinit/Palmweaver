@@ -42,10 +42,12 @@ int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 int g_bShowStatusBar = 1; /* Status bar on by default */
 int g_bFullScreen = 0;    /* Full screen off by default */
+static int g_bFSStatusBar = 0; /* Temporary status bar visibility in fullscreen */
 int g_bInverseColors = 0; /* Inverse fg/bg of current theme */
 int g_nTheme = 0;         /* Color theme: 0=default, 1=green, 2=amber, 3=blue */
 int g_bThemedSelection = 0; /* Theme selection highlight colors (opt-in) */
 int g_bShowScrollbars = 1;  /* Scrollbars on by default */
+int g_bHideTaskbar = 0;     /* Hide taskbar in fullscreen (off by default) */
 static int g_lineNumWidth = 20;
 
 /* Theme colors: {foreground, background} */
@@ -442,7 +444,10 @@ static void OnSize(HWND hwnd, int cx, int cy)
     /* Let status bar auto-size, then get its height */
     SendMessageW(g_hwndStatus, WM_SIZE, 0, 0);
     GetWindowRect(g_hwndStatus, &rcStatus);
-    sbHeight = (g_bShowStatusBar && !g_bFullScreen) ? (rcStatus.bottom - rcStatus.top) : 0;
+    if (g_bFullScreen)
+        sbHeight = g_bFSStatusBar ? (rcStatus.bottom - rcStatus.top) : 0;
+    else
+        sbHeight = g_bShowStatusBar ? (rcStatus.bottom - rcStatus.top) : 0;
 
     /* Set status bar parts: left 3/4, right 1/4 */
     {
@@ -1005,6 +1010,7 @@ static HWND g_hwndOptTabSize = NULL;
 #define IDC_OPT_FONTSIZE  105
 #define IDC_OPT_FIXEDFONT 106
 #define IDC_OPT_THEMEDSEL 107
+#define IDC_OPT_HIDETASKBAR 108
 
 /* External: settings */
 void ClearSettings(void);
@@ -1035,7 +1041,7 @@ static void UpdateFont(void)
 
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    static HWND hwndFontSize, hwndFixedFont, hwndThemedSel;
+    static HWND hwndFontSize, hwndFixedFont, hwndThemedSel, hwndHideTaskbar;
 
     switch (msg) {
     case WM_CREATE:
@@ -1077,13 +1083,19 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 10, 66, 160, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
             SendMessage(hwndThemedSel, BM_SETCHECK, g_bThemedSelection, 0);
 
-            /* Row 4: Buttons */
+            /* Row 4: Fullscreen option */
+            hwndHideTaskbar = CreateWindowW(L"BUTTON", L"Hide taskbar in fullscreen",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                10, 92, 170, 20, hwnd, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
+            SendMessage(hwndHideTaskbar, BM_SETCHECK, g_bHideTaskbar, 0);
+
+            /* Row 5: Buttons */
             CreateWindowW(L"BUTTON", L"Clear Settings",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                10, 94, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+                10, 120, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
             CreateWindowW(L"BUTTON", L"OK",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                180, 94, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
+                180, 120, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
         }
         return 0;
@@ -1111,6 +1123,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 if (!newThemedSel) RestoreSelectionColors();
                 g_bThemedSelection = newThemedSel;
             }
+
+            g_bHideTaskbar = (int)SendMessage(hwndHideTaskbar, BM_GETCHECK, 0, 0);
 
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
@@ -1154,7 +1168,7 @@ static void DoOptions(void)
     GetWindowRect(g_hwndMain, &rc);
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        rc.left + 30, rc.top + 60, 260, 145,
+        rc.left + 30, rc.top + 60, 260, 172,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
@@ -1829,10 +1843,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case IDM_VIEW_STATUSBAR:
-            g_bShowStatusBar = !g_bShowStatusBar;
-            ShowWindow(g_hwndStatus, g_bShowStatusBar ? SW_SHOW : SW_HIDE);
-            CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
-                g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
+            if (g_bFullScreen) {
+                /* In fullscreen: toggle temporary visibility without changing preference */
+                g_bFSStatusBar = !g_bFSStatusBar;
+                ShowWindow(g_hwndStatus, g_bFSStatusBar ? SW_SHOW : SW_HIDE);
+            } else {
+                /* Normal mode: toggle the saved preference */
+                g_bShowStatusBar = !g_bShowStatusBar;
+                ShowWindow(g_hwndStatus, g_bShowStatusBar ? SW_SHOW : SW_HIDE);
+                CheckMenuItem(g_hViewMenu, IDM_VIEW_STATUSBAR,
+                    g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
+            }
             SendMessage(hwnd, WM_SIZE, 0, 0);
             return 0;
 
@@ -1873,10 +1894,33 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_VIEW_FULLSCREEN:
             g_bFullScreen = !g_bFullScreen;
-            ShowWindow(g_hwndStatus, g_bFullScreen ? SW_HIDE : (g_bShowStatusBar ? SW_SHOW : SW_HIDE));
+            if (g_bFullScreen) {
+                g_bFSStatusBar = 0;  /* Reset temporary status bar when entering fullscreen */
+                ShowWindow(g_hwndStatus, SW_HIDE);
+            } else {
+                /* Restore status bar based on saved preference when exiting */
+                ShowWindow(g_hwndStatus, g_bShowStatusBar ? SW_SHOW : SW_HIDE);
+            }
             ShowWindow(g_hwndCB, g_bFullScreen ? SW_HIDE : SW_SHOW);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_FULLSCREEN,
                 g_bFullScreen ? MF_CHECKED : MF_UNCHECKED);
+            if (g_bHideTaskbar) {
+                static RECT s_rcRestore;
+                HWND hwndTaskbar = FindWindowW(L"HHTaskBar", NULL);
+                if (g_bFullScreen) {
+                    int cx = GetSystemMetrics(SM_CXSCREEN);
+                    int cy = GetSystemMetrics(SM_CYSCREEN);
+                    GetWindowRect(hwnd, &s_rcRestore);
+                    if (hwndTaskbar) ShowWindow(hwndTaskbar, SW_HIDE);
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, cx, cy, SWP_SHOWWINDOW);
+                } else {
+                    if (hwndTaskbar) ShowWindow(hwndTaskbar, SW_SHOW);
+                    SetWindowPos(hwnd, HWND_NOTOPMOST,
+                        s_rcRestore.left, s_rcRestore.top,
+                        s_rcRestore.right - s_rcRestore.left,
+                        s_rcRestore.bottom - s_rcRestore.top, SWP_SHOWWINDOW);
+                }
+            }
             SendMessage(hwnd, WM_SIZE, 0, 0);
             return 0;
 
@@ -1910,6 +1954,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        /* Restore taskbar if hidden */
+        if (g_bFullScreen && g_bHideTaskbar) {
+            HWND hwndTaskbar = FindWindowW(L"HHTaskBar", NULL);
+            if (hwndTaskbar) ShowWindow(hwndTaskbar, SW_SHOW);
+        }
         RestoreSelectionColors();
         SaveSettings();
         if (g_hBrushBg) DeleteObject(g_hBrushBg);
