@@ -30,8 +30,7 @@ HWND g_hwndEdit;
 HWND g_hwndStatus;
 HWND g_hwndLineNum;
 HFONT g_hFont;
-HBRUSH g_hBrushWhite;
-HBRUSH g_hBrushBlack;
+HBRUSH g_hBrushBg;
 HMENU g_hViewMenu;
 HMENU g_hRecentMenu;
 
@@ -42,8 +41,18 @@ int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 int g_bShowStatusBar = 1; /* Status bar on by default */
 int g_bFullScreen = 0;    /* Full screen off by default */
-int g_bInverseColors = 0; /* Inverse (white on black) off by default */
+int g_bInverseColors = 0; /* Inverse fg/bg of current theme */
+int g_nTheme = 0;         /* Color theme: 0=default, 1=green, 2=amber, 3=blue */
 static int g_lineNumWidth = 20;
+
+/* Theme colors: {foreground, background} */
+static COLORREF g_themes[][2] = {
+    {RGB(0, 0, 0),       RGB(255, 255, 255)},  /* 0: Default (black on white) */
+    {RGB(0, 255, 0),     RGB(0, 0, 0)},        /* 1: Green on black */
+    {RGB(255, 191, 0),   RGB(0, 0, 0)},        /* 2: Amber on black */
+    {RGB(255, 255, 255), RGB(0, 0, 128)}       /* 3: White on blue */
+};
+#define THEME_COUNT 4
 
 /* Tab settings */
 int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
@@ -79,6 +88,7 @@ static void OnSize(HWND hwnd, int cx, int cy);
 static void ShowAboutDialog(HWND hwndParent);
 static void UpdateTitle(void);
 static void UpdateStatus(void);
+static void UpdateTheme(void);
 static void DoFileNew(void);
 static int DoFileOpen(void);
 static int DoFileSave(void);
@@ -179,7 +189,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (msg == WM_ERASEBKGND) {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        FillRect((HDC)wParam, &rc, g_bInverseColors ? g_hBrushBlack : g_hBrushWhite);
+        FillRect((HDC)wParam, &rc, g_hBrushBg);
         return 1;
     }
 
@@ -342,7 +352,13 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_LINENUMS, L"&Line Numbers");
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_STATUSBAR, L"&Status Bar");
-    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\\tAlt+I");
+    AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_THEME_DEFAULT, L"Theme: &Default");
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_THEME_GREEN, L"Theme: &Green");
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_THEME_AMBER, L"Theme: &Amber");
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_THEME_BLUE, L"Theme: &Blue");
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\tAlt+I");
+    AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_FULLSCREEN, L"&Full Screen\tAlt+Enter");
     g_hViewMenu = hMenuView;
 
@@ -1091,7 +1107,7 @@ static LRESULT CALLBACK LineNumProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     if (msg == WM_ERASEBKGND) {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        FillRect((HDC)wParam, &rc, g_bInverseColors ? g_hBrushBlack : g_hBrushWhite);
+        FillRect((HDC)wParam, &rc, g_hBrushBg);
         return 1;
     }
 
@@ -1304,6 +1320,21 @@ static void UpdateStatus(void)
 }
 
 /*
+ * UpdateTheme - Recreate background brush and repaint for current theme
+ */
+static void UpdateTheme(void)
+{
+    COLORREF bg;
+
+    bg = g_bInverseColors ? g_themes[g_nTheme][0] : g_themes[g_nTheme][1];
+    if (g_hBrushBg) DeleteObject(g_hBrushBg);
+    g_hBrushBg = CreateSolidBrush(bg);
+
+    InvalidateRect(g_hwndEdit, NULL, TRUE);
+    InvalidateRect(g_hwndLineNum, NULL, TRUE);
+}
+
+/*
  * PromptSave - Ask user to save if dirty; returns 1 to proceed, 0 to cancel
  */
 static int PromptSave(void)
@@ -1492,9 +1523,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             /* Load settings before creating controls */
             LoadSettings();
 
-            /* Create white brush for edit backgrounds */
-            g_hBrushWhite = CreateSolidBrush(RGB(255, 255, 255));
-            g_hBrushBlack = CreateSolidBrush(RGB(0, 0, 0));
+            /* Create initial background brush for current theme */
+            g_hBrushBg = CreateSolidBrush(g_bInverseColors ? g_themes[g_nTheme][0] : g_themes[g_nTheme][1]);
 
             /* Create CommandBar */
             g_hwndCB = CommandBar_Create(g_hInst, hwnd, 1);
@@ -1510,6 +1540,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT, MF_UNCHECKED);
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
             UpdateRecentMenu();
 
             /* Create Status bar */
@@ -1680,12 +1712,21 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SendMessage(hwnd, WM_SIZE, 0, 0);
             return 0;
 
+        case IDM_VIEW_THEME_DEFAULT:
+        case IDM_VIEW_THEME_GREEN:
+        case IDM_VIEW_THEME_AMBER:
+        case IDM_VIEW_THEME_BLUE:
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_UNCHECKED);
+            g_nTheme = LOWORD(wParam) - IDM_VIEW_THEME_DEFAULT;
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
+            UpdateTheme();
+            return 0;
+
         case IDM_VIEW_INVERSE:
             g_bInverseColors = !g_bInverseColors;
             CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
-            InvalidateRect(g_hwndEdit, NULL, TRUE);
-            InvalidateRect(g_hwndLineNum, NULL, TRUE);
+            UpdateTheme();
             return 0;
 
         case IDM_VIEW_FULLSCREEN:
@@ -1718,22 +1759,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORSTATIC:
         if ((HWND)lParam == g_hwndLineNum || (HWND)lParam == g_hwndEdit) {
-            if (g_bInverseColors) {
-                SetTextColor((HDC)wParam, RGB(255, 255, 255));
-                SetBkColor((HDC)wParam, RGB(0, 0, 0));
-                return (LRESULT)g_hBrushBlack;
-            } else {
-                SetTextColor((HDC)wParam, RGB(0, 0, 0));
-                SetBkColor((HDC)wParam, RGB(255, 255, 255));
-                return (LRESULT)g_hBrushWhite;
-            }
+            COLORREF fg = g_bInverseColors ? g_themes[g_nTheme][1] : g_themes[g_nTheme][0];
+            COLORREF bg = g_bInverseColors ? g_themes[g_nTheme][0] : g_themes[g_nTheme][1];
+            SetTextColor((HDC)wParam, fg);
+            SetBkColor((HDC)wParam, bg);
+            return (LRESULT)g_hBrushBg;
         }
         break;
 
     case WM_DESTROY:
         SaveSettings();
-        if (g_hBrushWhite) DeleteObject(g_hBrushWhite);
-        if (g_hBrushBlack) DeleteObject(g_hBrushBlack);
+        if (g_hBrushBg) DeleteObject(g_hBrushBg);
         if (g_hFont) DeleteObject(g_hFont);
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
