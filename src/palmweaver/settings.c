@@ -7,12 +7,16 @@
 
 #define REG_KEY L"Software\\IntermountainSystems\\Palmweaver"
 
+/* Flag to skip saving after clear */
+static int g_bSettingsCleared = 0;
+
 /* Settings - declared extern in palmweaver.c */
 extern int g_bWordWrap;
 extern int g_bShowLineNums;
 extern int g_bShowStatusBar;
 extern int g_bInverseColors;
 extern int g_nTheme;
+extern int g_bThemedSelection;
 extern int g_bUseTabs;
 extern int g_nTabSize;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
@@ -52,6 +56,10 @@ void LoadSettings(void)
         g_nTheme = (int)val;
 
     size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"ThemedSelection", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bThemedSelection = (int)val;
+
+    size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"UseTabs", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bUseTabs = (int)val;
 
@@ -83,6 +91,10 @@ void SaveSettings(void)
     wchar_t name[16];
     int i;
 
+    /* Don't save if settings were cleared this session */
+    if (g_bSettingsCleared)
+        return;
+
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, NULL, 0, 0, NULL, &hKey, &disp) != ERROR_SUCCESS)
         return;
 
@@ -100,6 +112,9 @@ void SaveSettings(void)
 
     val = (DWORD)g_nTheme;
     RegSetValueExW(hKey, L"Theme", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
+    val = (DWORD)g_bThemedSelection;
+    RegSetValueExW(hKey, L"ThemedSelection", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
     val = (DWORD)g_bUseTabs;
     RegSetValueExW(hKey, L"UseTabs", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
@@ -120,7 +135,7 @@ void SaveSettings(void)
 }
 
 /*
- * ClearSettings - Delete all registry settings
+ * ClearSettings - Delete all registry settings and reset globals to defaults
  */
 void ClearSettings(void)
 {
@@ -138,4 +153,18 @@ void ClearSettings(void)
         RegCloseKey(hKey);
     }
     RegDeleteKeyW(HKEY_CURRENT_USER, REG_KEY);
+
+    /* Reset globals to defaults */
+    g_bWordWrap = 1;
+    g_bShowLineNums = 1;
+    g_bShowStatusBar = 1;
+    g_bInverseColors = 0;
+    g_nTheme = 0;
+    g_bThemedSelection = 0;
+    g_bUseTabs = 1;
+    g_nTabSize = 4;
+    g_recentCount = 0;
+
+    /* Prevent SaveSettings from writing on exit */
+    g_bSettingsCleared = 1;
 }

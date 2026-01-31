@@ -44,6 +44,7 @@ int g_bShowStatusBar = 1; /* Status bar on by default */
 int g_bFullScreen = 0;    /* Full screen off by default */
 int g_bInverseColors = 0; /* Inverse fg/bg of current theme */
 int g_nTheme = 0;         /* Color theme: 0=default, 1=green, 2=amber, 3=blue */
+int g_bThemedSelection = 0; /* Theme selection highlight colors (opt-in) */
 static int g_lineNumWidth = 20;
 
 /* Theme colors: {foreground, background} */
@@ -54,6 +55,10 @@ static COLORREF g_themes[][2] = {
     {RGB(255, 255, 255), RGB(0, 0, 128)}       /* 3: White on blue */
 };
 #define THEME_COUNT 4
+
+/* Original system colors (saved at startup, restored on exit/deactivate) */
+static COLORREF g_origHighlight;
+static COLORREF g_origHighlightText;
 
 /* Tab settings */
 int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
@@ -90,6 +95,8 @@ static void ShowAboutDialog(HWND hwndParent);
 static void UpdateTitle(void);
 static void UpdateStatus(void);
 static void UpdateTheme(void);
+static void ApplySelectionColors(void);
+static void RestoreSelectionColors(void);
 static void DoFileNew(void);
 static int DoFileOpen(void);
 static int DoFileSave(void);
@@ -192,6 +199,16 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         GetClientRect(hwnd, &rc);
         FillRect((HDC)wParam, &rc, g_hBrushBg);
         return 1;
+    }
+
+    /* Apply theme selection colors when edit gains focus */
+    if (msg == WM_SETFOCUS && g_bThemedSelection) {
+        ApplySelectionColors();
+    }
+
+    /* Restore system selection colors when edit loses focus */
+    if (msg == WM_KILLFOCUS && g_bThemedSelection) {
+        RestoreSelectionColors();
     }
 
     /* Handle Tab key - insert spaces if configured */
@@ -961,6 +978,7 @@ static HWND g_hwndOptTabSize = NULL;
 #define IDC_OPT_CLEARREG  104
 #define IDC_OPT_FONTSIZE  105
 #define IDC_OPT_FIXEDFONT 106
+#define IDC_OPT_THEMEDSEL 107
 
 /* External: settings */
 void ClearSettings(void);
@@ -991,7 +1009,7 @@ static void UpdateFont(void)
 
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    static HWND hwndFontSize, hwndFixedFont;
+    static HWND hwndFontSize, hwndFixedFont, hwndThemedSel;
 
     switch (msg) {
     case WM_CREATE:
@@ -1024,16 +1042,22 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             SendMessageW(hwndFontSize, CB_SETCURSEL, g_fontSizeIdx, 0);
             hwndFixedFont = CreateWindowW(L"BUTTON", L"Fixed width font",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                130, 38, 100, 20, hwnd, (HMENU)IDC_OPT_FIXEDFONT, g_hInst, NULL);
+                130, 38, 120, 20, hwnd, (HMENU)IDC_OPT_FIXEDFONT, g_hInst, NULL);
             SendMessage(hwndFixedFont, BM_SETCHECK, g_bFixedFont, 0);
 
-            /* Row 3: Buttons */
+            /* Row 3: Theme option */
+            hwndThemedSel = CreateWindowW(L"BUTTON", L"Theme selection highlight",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                10, 66, 160, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
+            SendMessage(hwndThemedSel, BM_SETCHECK, g_bThemedSelection, 0);
+
+            /* Row 4: Buttons */
             CreateWindowW(L"BUTTON", L"Clear Settings",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                10, 68, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+                10, 94, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
             CreateWindowW(L"BUTTON", L"OK",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                180, 68, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
+                180, 94, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
         }
         return 0;
@@ -1041,7 +1065,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
             wchar_t buf[8];
-            int size, newSizeIdx, newFixed;
+            int size, newSizeIdx, newFixed, newThemedSel;
             g_bUseTabs = (int)SendMessage(g_hwndOptUseTabs, BM_GETCHECK, 0, 0);
             GetWindowTextW(g_hwndOptTabSize, buf, 8);
             size = 0;
@@ -1056,6 +1080,12 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 UpdateFont();
             }
 
+            newThemedSel = (int)SendMessage(hwndThemedSel, BM_GETCHECK, 0, 0);
+            if (newThemedSel != g_bThemedSelection) {
+                if (!newThemedSel) RestoreSelectionColors();
+                g_bThemedSelection = newThemedSel;
+            }
+
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
             SetFocus(g_hwndEdit);
@@ -1063,6 +1093,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (MessageBoxW(hwnd, L"Clear all settings and recent files?",
                     L"Clear Settings", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 ClearSettings();
+                UpdateTheme();
                 MessageBoxW(hwnd, L"Settings cleared. Changes take effect on restart.",
                     L"Clear Settings", MB_OK);
             }
@@ -1097,7 +1128,7 @@ static void DoOptions(void)
     GetWindowRect(g_hwndMain, &rc);
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        rc.left + 30, rc.top + 60, 245, 120,
+        rc.left + 30, rc.top + 60, 260, 145,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
@@ -1339,8 +1370,42 @@ static void UpdateTheme(void)
     if (g_hBrushBg) DeleteObject(g_hBrushBg);
     g_hBrushBg = CreateSolidBrush(bg);
 
+    if (g_bThemedSelection && GetFocus() == g_hwndEdit)
+        ApplySelectionColors();
+
     InvalidateRect(g_hwndEdit, NULL, TRUE);
     InvalidateRect(g_hwndLineNum, NULL, TRUE);
+}
+
+/*
+ * ApplySelectionColors - Set system highlight colors to match theme (inverted)
+ */
+static void ApplySelectionColors(void)
+{
+    int elements[2];
+    COLORREF colors[2];
+
+    elements[0] = COLOR_HIGHLIGHT;
+    elements[1] = COLOR_HIGHLIGHTTEXT;
+    /* Selection uses inverted theme colors for contrast */
+    colors[0] = g_bInverseColors ? g_themes[g_nTheme][1] : g_themes[g_nTheme][0];
+    colors[1] = g_bInverseColors ? g_themes[g_nTheme][0] : g_themes[g_nTheme][1];
+    SetSysColors(2, elements, colors);
+}
+
+/*
+ * RestoreSelectionColors - Restore original system highlight colors
+ */
+static void RestoreSelectionColors(void)
+{
+    int elements[2];
+    COLORREF colors[2];
+
+    elements[0] = COLOR_HIGHLIGHT;
+    elements[1] = COLOR_HIGHLIGHTTEXT;
+    colors[0] = g_origHighlight;
+    colors[1] = g_origHighlightText;
+    SetSysColors(2, elements, colors);
 }
 
 /*
@@ -1531,6 +1596,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             /* Load settings before creating controls */
             LoadSettings();
+
+            /* Save original system highlight colors */
+            g_origHighlight = GetSysColor(COLOR_HIGHLIGHT);
+            g_origHighlightText = GetSysColor(COLOR_HIGHLIGHTTEXT);
 
             /* Create initial background brush for current theme */
             g_hBrushBg = CreateSolidBrush(g_bInverseColors ? g_themes[g_nTheme][0] : g_themes[g_nTheme][1]);
@@ -1777,12 +1846,28 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        RestoreSelectionColors();
         SaveSettings();
         if (g_hBrushBg) DeleteObject(g_hBrushBg);
         if (g_hFont) DeleteObject(g_hFont);
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
         return 0;
+
+    case WM_INITMENUPOPUP:
+        if (g_bThemedSelection)
+            RestoreSelectionColors();
+        break;
+
+    case WM_ENTERMENULOOP:
+        if (g_bThemedSelection)
+            RestoreSelectionColors();
+        break;
+
+    case WM_EXITMENULOOP:
+        if (g_bThemedSelection && GetFocus() == g_hwndEdit)
+            ApplySelectionColors();
+        break;
 
     case WM_CLOSE:
         if (PromptSave()) {
