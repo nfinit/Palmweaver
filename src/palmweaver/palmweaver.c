@@ -9,12 +9,17 @@
 #include <commctrl.h>
 #include "resource.h"
 
+/*
+ * CE SDK header gaps - these constants exist in desktop Windows headers but
+ * are missing from CE 2.0 SDK headers. We define them ourselves since the
+ * underlying OS still supports the functionality.
+ */
 #ifndef ICON_SMALL
-#define ICON_SMALL 0
+#define ICON_SMALL 0  /* WM_SETICON parameter for small (title bar) icon */
 #endif
 
 #ifndef IDI_PALMWEAVER
-#define IDI_PALMWEAVER 1
+#define IDI_PALMWEAVER 1  /* Resource ID fallback if resource.h not included */
 #endif
 
 /* Global instance handle (CE has no GetModuleHandle) */
@@ -544,7 +549,7 @@ static void DoGotoLine(void)
 
     GetWindowRect(g_hwndMain, &rc);
 #ifndef WS_EX_TOOLWINDOW
-#define WS_EX_TOOLWINDOW 0x00000080L
+#define WS_EX_TOOLWINDOW 0x00000080L  /* Extended style for floating tool windows - missing from CE 2.0 headers */
 #endif
     g_hwndGotoDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverGoto", L"Go to Line",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
