@@ -426,6 +426,14 @@ static void OnSize(HWND hwnd, int cx, int cy)
     GetWindowRect(g_hwndStatus, &rcStatus);
     sbHeight = (g_bShowStatusBar && !g_bFullScreen) ? (rcStatus.bottom - rcStatus.top) : 0;
 
+    /* Set status bar parts: left 3/4, right 1/4 */
+    {
+        int parts[2];
+        parts[0] = (cx * 3) / 4;
+        parts[1] = -1;
+        SendMessageW(g_hwndStatus, SB_SETPARTS, 2, (LPARAM)parts);
+    }
+
     editHeight = cy - cbHeight - sbHeight;
     editLeft = g_bShowLineNums ? g_lineNumWidth : 0;
 
@@ -1340,23 +1348,36 @@ static void OpenRecentFile(int index)
 static void UpdateStatus(void)
 {
     static DWORD s_lastSel = (DWORD)-1;
+    static int s_lastLines = -1;
+    static int s_lastChars = -1;
     DWORD sel;
-    int line, col;
+    int line, col, totalLines, totalChars;
     int lineStart;
     wchar_t buf[64];
 
     sel = (DWORD)SendMessageW(g_hwndEdit, EM_GETSEL, 0, 0);
-    if (sel == s_lastSel) return;
-    s_lastSel = sel;
+    totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+    totalChars = GetWindowTextLengthW(g_hwndEdit);
 
-    /* Get line number from character index (caret is in LOWORD) */
-    line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, LOWORD(sel), 0);
-    /* Get character index of line start */
-    lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, line, 0);
-    col = LOWORD(sel) - lineStart;
+    /* Update left part if cursor moved */
+    if (sel != s_lastSel) {
+        s_lastSel = sel;
+        line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, LOWORD(sel), 0);
+        lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, line, 0);
+        col = LOWORD(sel) - lineStart;
+        wsprintfW(buf, L"Ln %d, Col %d", line + 1, col + 1);
+        SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)buf);
+    }
 
-    wsprintfW(buf, L"Ln %d, Col %d", line + 1, col + 1);
-    SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)buf);
+    /* Update right part if totals changed */
+    if (totalLines != s_lastLines || totalChars != s_lastChars) {
+        s_lastLines = totalLines;
+        s_lastChars = totalChars;
+        wsprintfW(buf, L"%d line%s, %d char%s", 
+            totalLines, totalLines == 1 ? L"" : L"s",
+            totalChars, totalChars == 1 ? L"" : L"s");
+        SendMessageW(g_hwndStatus, SB_SETTEXTW, 1, (LPARAM)buf);
+    }
 }
 
 /*
