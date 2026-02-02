@@ -681,6 +681,10 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
     SetWindowLong(g_hwndCancel, GWL_WNDPROC, (LONG)PickerBtnProc);
 
     PopulateFileList();
+
+    /* Bring to front (needed for full-screen mode) */
+    SetForegroundWindow(g_hwndPicker);
+
     SetFocus(g_hwndList);
 
     /* Modal loop */
