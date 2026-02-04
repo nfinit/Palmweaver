@@ -110,6 +110,7 @@ static void DoFind(void);
 static void DoFindNext(void);
 static void DoReplace(void);
 static void DoInsertDateTime(int mode);
+static void DoInsertRule(void);
 static void UpdateLineNumbers(void);
 static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
@@ -188,6 +189,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'G') { DoGotoLine(); return 1; }
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
+        if (wParam == 'R') { DoInsertRule(); return 1; }
         if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
         /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
@@ -258,7 +260,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
         if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || /* Ctrl+A, F, G, H */
-            wParam == 14 || wParam == 15 || wParam == 19 || wParam == 23) /* Ctrl+N, O, S, W */
+            wParam == 14 || wParam == 15 || wParam == 18 || wParam == 19 || wParam == 23) /* Ctrl+N, O, R, S, W */
             return 0;
     }
 
@@ -405,6 +407,8 @@ static void CreateMenuBar(HWND hwndCB)
         AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSDATE, L"&Date\tCtrl+;");
         AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSTIME, L"&Time\tCtrl+'");
         AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSDATETIME, L"Date && Ti&me\tCtrl+:");
+        AppendMenuW(hMenuInsert, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSRULE, L"&Horizontal Rule\tCtrl+R");
         AppendMenuW(hMenuEdit, MF_POPUP, (UINT)hMenuInsert, L"&Insert");
     }
 
@@ -1039,6 +1043,28 @@ static void DoInsertDateTime(int mode)
         wsprintfW(buf, L"%04d-%02d-%02d %02d:%02d",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     }
+
+    SetFocus(g_hwndEdit);
+    SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)buf);
+}
+
+/*
+ * DoInsertRule - Insert horizontal rule on its own line
+ * Width: 40 chars on narrow displays (<=480px), 72 chars otherwise
+ */
+static void DoInsertRule(void)
+{
+    wchar_t buf[80];
+    int i, width;
+
+    width = (GetSystemMetrics(SM_CXSCREEN) <= 480) ? 40 : 72;
+
+    buf[0] = L'\r';
+    buf[1] = L'\n';
+    for (i = 0; i < width; i++) buf[2 + i] = L'-';
+    buf[2 + width] = L'\r';
+    buf[3 + width] = L'\n';
+    buf[4 + width] = 0;
 
     SetFocus(g_hwndEdit);
     SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)buf);
@@ -1883,6 +1909,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_EDIT_INSDATETIME:
             DoInsertDateTime(2);
+            return 0;
+
+        case IDM_EDIT_INSRULE:
+            DoInsertRule();
             return 0;
 
         case IDM_VIEW_WORDWRAP:
