@@ -834,3 +834,26 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
     }
     return 0;
 }
+
+/*============================================================================
+** Last directory getter/setter for settings persistence
+**============================================================================*/
+
+void FilePickerGetLastDir(wchar_t *buf, int maxLen)
+{
+    if (g_lastDir[0] && maxLen > 0) {
+        int i;
+        for (i = 0; i < maxLen - 1 && g_lastDir[i]; i++)
+            buf[i] = g_lastDir[i];
+        buf[i] = 0;
+    } else if (maxLen > 0) {
+        buf[0] = 0;
+    }
+}
+
+void FilePickerSetLastDir(const wchar_t *dir)
+{
+    if (dir && dir[0]) {
+        lstrcpyW(g_lastDir, dir);
+    }
+}

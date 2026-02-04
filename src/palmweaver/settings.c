@@ -24,6 +24,10 @@ extern int g_nTabSize;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
 extern int g_recentCount;
 
+/* File picker last directory - defined in filepicker.c */
+void FilePickerGetLastDir(wchar_t *buf, int maxLen);
+void FilePickerSetLastDir(const wchar_t *dir);
+
 /*
  * LoadSettings - Load settings from registry
  */
@@ -88,6 +92,14 @@ void LoadSettings(void)
             break;
     }
 
+    /* Load last directory */
+    {
+        wchar_t lastDir[MAX_PATH];
+        size = MAX_PATH * sizeof(wchar_t);
+        if (RegQueryValueExW(hKey, L"LastDir", NULL, &type, (LPBYTE)lastDir, &size) == ERROR_SUCCESS && type == REG_SZ && lastDir[0])
+            FilePickerSetLastDir(lastDir);
+    }
+
     RegCloseKey(hKey);
 }
 
@@ -145,6 +157,14 @@ void SaveSettings(void)
             RegSetValueExW(hKey, name, 0, REG_SZ, (LPBYTE)g_recentFiles[i], (lstrlenW(g_recentFiles[i]) + 1) * sizeof(wchar_t));
         else
             RegDeleteValueW(hKey, name);
+    }
+
+    /* Save last directory */
+    {
+        wchar_t lastDir[MAX_PATH];
+        FilePickerGetLastDir(lastDir, MAX_PATH);
+        if (lastDir[0])
+            RegSetValueExW(hKey, L"LastDir", 0, REG_SZ, (LPBYTE)lastDir, (lstrlenW(lastDir) + 1) * sizeof(wchar_t));
     }
 
     RegCloseKey(hKey);
