@@ -796,9 +796,8 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
 
     /* Buttons */
     g_hwndNewFolder = CreateWindowW(L"BUTTON", L"New folder",
-        WS_CHILD | WS_VISIBLE,
+        WS_CHILD | (saveMode ? WS_VISIBLE : 0),
         10, 140, 75, 22, g_hwndPicker, (HMENU)IDC_NEWFOLDER, g_hInst, NULL);
-    if (!saveMode) EnableWindow(g_hwndNewFolder, FALSE);
     g_hwndOK = CreateWindowW(L"BUTTON", saveMode ? L"Save" : L"Open",
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
         dlgW - 160, 140, 70, 22, g_hwndPicker, (HMENU)IDOK, g_hInst, NULL);
