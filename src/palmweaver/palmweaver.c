@@ -1051,20 +1051,35 @@ static void DoInsertDateTime(int mode)
 /*
  * DoInsertRule - Insert horizontal rule on its own line
  * Width: 40 chars on narrow displays (<=480px), 72 chars otherwise
+ * Skips leading newline if cursor is already at start of empty line
  */
 static void DoInsertRule(void)
 {
     wchar_t buf[80];
-    int i, width;
+    wchar_t *p = buf;
+    int i, width, selStart;
+    int atLineStart = 0;
 
     width = (GetSystemMetrics(SM_CXSCREEN) <= 480) ? 40 : 72;
 
-    buf[0] = L'\r';
-    buf[1] = L'\n';
-    for (i = 0; i < width; i++) buf[2 + i] = L'-';
-    buf[2 + width] = L'\r';
-    buf[3 + width] = L'\n';
-    buf[4 + width] = 0;
+    /* Check if cursor is at start of line */
+    SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, 0);
+    if (selStart == 0) {
+        atLineStart = 1;
+    } else {
+        int lineIdx = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
+        int lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, lineIdx, 0);
+        if (selStart == lineStart) atLineStart = 1;
+    }
+
+    if (!atLineStart) {
+        *p++ = L'\r';
+        *p++ = L'\n';
+    }
+    for (i = 0; i < width; i++) *p++ = L'-';
+    *p++ = L'\r';
+    *p++ = L'\n';
+    *p = 0;
 
     SetFocus(g_hwndEdit);
     SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)buf);
