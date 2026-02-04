@@ -41,6 +41,9 @@ static WNDPROC g_pfnBtnProc = NULL;
 static wchar_t g_typeAhead[TYPEAHEAD_MAX + 1];
 static int g_typeAheadLen = 0;
 
+/* Session memory for last directory */
+static wchar_t g_lastDir[MAX_PATH] = L"";
+
 /* Forward declarations */
 static void PopulateFilterCombo(const wchar_t *filter);
 static void PopulateFileList(void);
@@ -606,7 +609,10 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
     g_pickerOK = 0;
     g_pickerDone = 0;
 
-    if (initialDir && initialDir[0]) {
+    /* Use last directory if available, otherwise initialDir, otherwise root */
+    if (g_lastDir[0]) {
+        lstrcpyW(g_pickerDir, g_lastDir);
+    } else if (initialDir && initialDir[0]) {
         lstrcpyW(g_pickerDir, initialDir);
     } else {
         lstrcpyW(g_pickerDir, L"\\");
@@ -700,6 +706,8 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
 
     if (g_pickerOK && g_pickerResult[0]) {
         lstrcpyW(filePath, g_pickerResult);
+        /* Remember directory for session */
+        lstrcpyW(g_lastDir, g_pickerDir);
         return 1;
     }
     return 0;

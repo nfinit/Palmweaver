@@ -263,9 +263,9 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         return r;
     }
 
-    if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
+    if (msg == WM_KEYUP || msg == WM_LBUTTONUP || msg == WM_CHAR) {
         UpdateStatus();
-        UpdateLineNumbers();
+        if (msg != WM_CHAR) UpdateLineNumbers();
     }
 
     return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
