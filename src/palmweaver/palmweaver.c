@@ -72,6 +72,9 @@ static int g_fontSizes[] = {10, 12, 14, 16};
 static int g_fontSizeIdx = 2;  /* Default 14 */
 static int g_bFixedFont = 1;   /* Default fixed (Courier New) */
 
+/* Display capabilities */
+static int g_bColorDisplay = 1;  /* 0 = grayscale, 1 = color */
+
 /* Recent files */
 wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH] = {0};
 int g_recentCount = 0;
@@ -292,9 +295,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPWSTR lpCmdLine, int nCmdShow)
 {
     MSG msg;
+    HDC hdc;
 
     (void)hPrevInstance;
     (void)lpCmdLine;
+
+    /* Detect color vs grayscale display */
+    hdc = GetDC(NULL);
+    g_bColorDisplay = (GetDeviceCaps(hdc, BITSPIXEL) > 4) ? 1 : 0;
+    ReleaseDC(NULL, hdc);
 
     if (!InitApplication(hInstance)) {
         return 1;
@@ -419,17 +428,20 @@ static void CreateMenuBar(HWND hwndCB)
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_SCROLLBARS, L"Scro&llbars\tAlt+S");
     AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
 
-    /* Theme submenu */
-    hMenuTheme = CreatePopupMenu();
-    AppendMenuW(hMenuTheme, MF_STRING | MF_CHECKED, IDM_VIEW_THEME_DEFAULT, L"&Default");
-    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_GREEN, L"&Green");
-    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_AMBER, L"&Amber");
-    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_BLUE, L"&Blue");
-    AppendMenuW(hMenuTheme, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\tAlt+I");
-    AppendMenuW(hMenuView, MF_POPUP, (UINT)hMenuTheme, L"&Theme");
-    g_hThemeMenu = hMenuTheme;
+    /* Theme submenu - only show on color displays */
+    if (g_bColorDisplay) {
+        hMenuTheme = CreatePopupMenu();
+        AppendMenuW(hMenuTheme, MF_STRING | MF_CHECKED, IDM_VIEW_THEME_DEFAULT, L"&Default");
+        AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_GREEN, L"&Green");
+        AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_AMBER, L"&Amber");
+        AppendMenuW(hMenuTheme, MF_STRING, IDM_VIEW_THEME_BLUE, L"&Blue");
+        AppendMenuW(hMenuView, MF_POPUP, (UINT)hMenuTheme, L"&Theme");
+        g_hThemeMenu = hMenuTheme;
+    } else {
+        g_hThemeMenu = NULL;
+    }
 
+    AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_INVERSE, L"&Inverse Colors\tAlt+I");
     AppendMenuW(hMenuView, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuView, MF_STRING, IDM_VIEW_FULLSCREEN, L"&Full Screen\tAlt+Enter");
     g_hViewMenu = hMenuView;
@@ -1773,10 +1785,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowStatusBar ? MF_CHECKED : MF_UNCHECKED);
             CheckMenuItem(g_hViewMenu, IDM_VIEW_SCROLLBARS,
                 g_bShowScrollbars ? MF_CHECKED : MF_UNCHECKED);
-            CheckMenuItem(g_hThemeMenu, IDM_VIEW_INVERSE,
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
-            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT, MF_UNCHECKED);
-            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
+            if (g_hThemeMenu) {
+                CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT, MF_UNCHECKED);
+                CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
+            }
             UpdateRecentMenu();
 
             /* Create Status bar */
@@ -1997,15 +2011,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_VIEW_THEME_GREEN:
         case IDM_VIEW_THEME_AMBER:
         case IDM_VIEW_THEME_BLUE:
-            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_UNCHECKED);
-            g_nTheme = LOWORD(wParam) - IDM_VIEW_THEME_DEFAULT;
-            CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
-            UpdateTheme();
+            if (g_hThemeMenu) {
+                CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_UNCHECKED);
+                g_nTheme = LOWORD(wParam) - IDM_VIEW_THEME_DEFAULT;
+                CheckMenuItem(g_hThemeMenu, IDM_VIEW_THEME_DEFAULT + g_nTheme, MF_CHECKED);
+                UpdateTheme();
+            }
             return 0;
 
         case IDM_VIEW_INVERSE:
             g_bInverseColors = !g_bInverseColors;
-            CheckMenuItem(g_hThemeMenu, IDM_VIEW_INVERSE,
+            CheckMenuItem(g_hViewMenu, IDM_VIEW_INVERSE,
                 g_bInverseColors ? MF_CHECKED : MF_UNCHECKED);
             UpdateTheme();
             return 0;
