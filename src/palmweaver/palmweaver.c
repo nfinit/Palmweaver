@@ -1613,7 +1613,7 @@ static int DoFileOpen(void)
     if (!PromptSave()) return 0;
 
     if (!FilePicker(g_hwndMain, szFile, MAX_PATH,
-            L"Open File", g_szFilter, NULL, L"\\My Documents", 0)) {
+            L"Open File", g_szFilter, NULL, NULL, 0)) {
         return 0;
     }
 
@@ -1726,7 +1726,7 @@ static int DoFileSaveAs(void)
     }
 
     if (!FilePicker(g_hwndMain, szFile, MAX_PATH,
-            L"Save File", g_szFilter, L"txt", L"\\My Documents", 1)) {
+            L"Save File", g_szFilter, L"txt", NULL, 1)) {
         return 0;
     }
 

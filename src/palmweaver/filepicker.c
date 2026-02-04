@@ -11,6 +11,9 @@
 /* External globals from palmweaver.c */
 extern HINSTANCE g_hInst;
 
+/* Default directory for file operations */
+static const wchar_t *g_defaultDir = L"\\My Documents";
+
 /*============================================================================
 ** File Picker State
 **============================================================================*/
@@ -727,13 +730,33 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
     g_pickerOK = 0;
     g_pickerDone = 0;
 
-    /* Use last directory if available, otherwise initialDir, otherwise root */
+    /* Use last directory if available, otherwise default directory, otherwise root */
     if (g_lastDir[0]) {
         lstrcpyW(g_pickerDir, g_lastDir);
     } else if (initialDir && initialDir[0]) {
         lstrcpyW(g_pickerDir, initialDir);
     } else {
-        lstrcpyW(g_pickerDir, L"\\");
+        DWORD attr = GetFileAttributesW(g_defaultDir);
+        if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            lstrcpyW(g_pickerDir, g_defaultDir);
+        } else {
+            lstrcpyW(g_pickerDir, L"\\");
+        }
+    }
+
+    /* Verify directory exists, fall back to default then root */
+    if (lstrcmpW(g_pickerDir, L"\\") != 0 && lstrcmpW(g_pickerDir, g_defaultDir) != 0) {
+        DWORD attr = GetFileAttributesW(g_pickerDir);
+        if (attr == 0xFFFFFFFF || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            g_lastDir[0] = 0;  /* Clear invalid saved directory */
+            /* Try default directory */
+            attr = GetFileAttributesW(g_defaultDir);
+            if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                lstrcpyW(g_pickerDir, g_defaultDir);
+            } else {
+                lstrcpyW(g_pickerDir, L"\\");
+            }
+        }
     }
 
     /* Pre-fill filename if provided */
