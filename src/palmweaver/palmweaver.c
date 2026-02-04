@@ -109,6 +109,7 @@ static void DoGotoLine(void);
 static void DoFind(void);
 static void DoFindNext(void);
 static void DoReplace(void);
+static void DoInsertDateTime(int mode);
 static void UpdateLineNumbers(void);
 static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
@@ -196,6 +197,17 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         }
         if (wParam == VK_SUBTRACT || wParam == 0xBD) {  /* Numpad- or -/_ key */
             if (g_fontSizeIdx > 0) { g_fontSizeIdx--; UpdateFont(); }
+            return 1;
+        }
+        /* Ctrl+; = Insert Date, Ctrl+Shift+; = Insert Date+Time */
+        if (wParam == 0xBA) {  /* VK_OEM_1 = ;/: key */
+            int shift = GetKeyState(VK_SHIFT) < 0;
+            DoInsertDateTime(shift ? 2 : 0);
+            return 1;
+        }
+        /* Ctrl+' = Insert Time */
+        if (wParam == 0xDE) {  /* VK_OEM_7 = '/\" key */
+            DoInsertDateTime(1);
             return 1;
         }
     }
@@ -378,18 +390,23 @@ static void CreateMenuBar(HWND hwndCB)
 
     /* Edit menu */
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_UNDO, L"&Undo\tCtrl+Z");
-    AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_CUT, L"Cu&t\tCtrl+X");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_COPY, L"&Copy\tCtrl+C");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_PASTE, L"&Paste\tCtrl+V");
-    AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All\tCtrl+A");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FIND, L"&Find...\tCtrl+F");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FINDNEXT, L"Find &Next\tCtrl+3");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_REPLACE, L"&Replace...\tCtrl+H");
-    AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_GOTOLINE, L"&Go to Line...\tCtrl+G");
+    AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
+    {
+        HMENU hMenuInsert = CreatePopupMenu();
+        AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSDATE, L"&Date\tCtrl+;");
+        AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSTIME, L"&Time\tCtrl+'");
+        AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSDATETIME, L"Date && Ti&me\tCtrl+:");
+        AppendMenuW(hMenuEdit, MF_POPUP, (UINT)hMenuInsert, L"&Insert");
+    }
 
     /* View menu */
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap\tAlt+W");
@@ -998,6 +1015,33 @@ static void DoReplace(void)
         rc.left + 20, rc.top + 50, 240, 130,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndReplaceDlg, SW_SHOW);
+}
+
+/*
+ * DoInsertDateTime - Insert date and/or time at cursor
+ * mode: 0=date, 1=time, 2=both
+ */
+static void DoInsertDateTime(int mode)
+{
+    SYSTEMTIME st;
+    wchar_t buf[64];
+
+    GetLocalTime(&st);
+
+    if (mode == 0) {
+        /* Date only: YYYY-MM-DD */
+        wsprintfW(buf, L"%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+    } else if (mode == 1) {
+        /* Time only: HH:MM */
+        wsprintfW(buf, L"%02d:%02d", st.wHour, st.wMinute);
+    } else {
+        /* Both: YYYY-MM-DD HH:MM */
+        wsprintfW(buf, L"%04d-%02d-%02d %02d:%02d",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+    }
+
+    SetFocus(g_hwndEdit);
+    SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)buf);
 }
 
 /*
@@ -1827,6 +1871,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_EDIT_GOTOLINE:
             DoGotoLine();
+            return 0;
+
+        case IDM_EDIT_INSDATE:
+            DoInsertDateTime(0);
+            return 0;
+
+        case IDM_EDIT_INSTIME:
+            DoInsertDateTime(1);
+            return 0;
+
+        case IDM_EDIT_INSDATETIME:
+            DoInsertDateTime(2);
             return 0;
 
         case IDM_VIEW_WORDWRAP:
