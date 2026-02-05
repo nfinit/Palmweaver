@@ -95,6 +95,9 @@ static const WCHAR g_szUntitled[] = L"Untitled";
 /* File filter for picker */
 static const WCHAR g_szFilter[] = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
 
+/* Status bar message */
+static wchar_t g_szStatusMsg[128] = L"";
+
 /* Forward declarations */
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static BOOL InitApplication(HINSTANCE hInstance);
@@ -104,6 +107,8 @@ static void OnSize(HWND hwnd, int cx, int cy);
 static void ShowAboutDialog(HWND hwndParent);
 static void UpdateTitle(void);
 static void UpdateStatus(void);
+static void SetStatusMessage(const wchar_t *msg);
+static void ClearStatusMessage(void);
 static void UpdateTheme(void);
 static void ApplySelectionColors(void);
 static void RestoreSelectionColors(void);
@@ -289,6 +294,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     }
 
     if (msg == WM_KEYUP || msg == WM_LBUTTONUP || msg == WM_CHAR) {
+        ClearStatusMessage();
         UpdateStatus();
         if (msg != WM_CHAR) UpdateLineNumbers();
     }
@@ -1657,6 +1663,12 @@ static void UpdateStatus(void)
     int lineStart;
     wchar_t buf[64];
 
+    /* If there's a status message, show it once then let it persist */
+    if (g_szStatusMsg[0]) {
+        SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)g_szStatusMsg);
+        return;
+    }
+
     sel = (DWORD)SendMessageW(g_hwndEdit, EM_GETSEL, 0, 0);
     totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
     totalChars = GetWindowTextLengthW(g_hwndEdit);
@@ -1679,6 +1691,30 @@ static void UpdateStatus(void)
             totalLines, totalLines == 1 ? L"" : L"s",
             totalChars, totalChars == 1 ? L"" : L"s");
         SendMessageW(g_hwndStatus, SB_SETTEXTW, 1, (LPARAM)buf);
+    }
+}
+
+/*
+ * SetStatusMessage - Display a temporary message in the status bar
+ */
+static void SetStatusMessage(const wchar_t *msg)
+{
+    if (msg) {
+        int i;
+        for (i = 0; i < 127 && msg[i]; i++) g_szStatusMsg[i] = msg[i];
+        g_szStatusMsg[i] = 0;
+        SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)g_szStatusMsg);
+    }
+}
+
+/*
+ * ClearStatusMessage - Clear temporary message, restore normal status
+ */
+static void ClearStatusMessage(void)
+{
+    if (g_szStatusMsg[0]) {
+        g_szStatusMsg[0] = 0;
+        UpdateStatus();
     }
 }
 
@@ -1877,6 +1913,13 @@ static int DoFileSave(void)
 
     g_bDirty = 0;
     UpdateTitle();
+
+    /* Show save confirmation in status bar */
+    {
+        wchar_t msg[128];
+        wsprintfW(msg, L"Saved: %s", g_szFilePath);
+        SetStatusMessage(msg);
+    }
     return 1;
 }
 
