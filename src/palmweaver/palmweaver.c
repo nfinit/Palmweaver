@@ -251,6 +251,114 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
         return 0;
     }
+    
+    /* Intercept Ctrl+Y for redo */
+    if (msg == WM_KEYDOWN && wParam == 'Y' && GetKeyState(VK_CONTROL) < 0) {
+        Undo_Redo();
+        return 0;
+    }
+    
+    /* Intercept Ctrl+X for cut with undo tracking */
+    if (msg == WM_KEYDOWN && wParam == 'X' && GetKeyState(VK_CONTROL) < 0) {
+        DWORD selStart, selEnd;
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selEnd > selStart) {
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                LocalFree(buf);
+            }
+        }
+        SendMessageW(hwnd, WM_CUT, 0, 0);
+        return 0;
+    }
+    
+    /* Intercept Ctrl+V for paste with undo tracking */
+    if (msg == WM_KEYDOWN && wParam == 'V' && GetKeyState(VK_CONTROL) < 0) {
+        DWORD selStart, selEnd;
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selEnd > selStart) {
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                LocalFree(buf);
+            }
+        }
+        if (OpenClipboard(hwnd)) {
+            HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+            if (hData) {
+                wchar_t *pText = (wchar_t *)hData;
+                if (pText && pText[0]) {
+                    Undo_RecordInsert(selStart, pText, -1);
+                }
+            }
+            CloseClipboard();
+        }
+        SendMessageW(hwnd, WM_PASTE, 0, 0);
+        return 0;
+    }
+
+    /* Track Delete key - record char at cursor before delete */
+    if (msg == WM_KEYDOWN && wParam == VK_DELETE) {
+        DWORD selStart, selEnd;
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selStart == selEnd) {
+            /* No selection - deleting single char at cursor */
+            int len = GetWindowTextLengthW(hwnd);
+            if ((int)selStart < len) {
+                wchar_t ch[2];
+                wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+                if (buf) {
+                    GetWindowTextW(hwnd, buf, len + 1);
+                    ch[0] = buf[selStart];
+                    ch[1] = 0;
+                    Undo_RecordDelete(selStart, ch, 1);
+                    LocalFree(buf);
+                }
+            }
+        } else {
+            /* Selection - record selected text */
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                LocalFree(buf);
+            }
+        }
+    }
+    
+    /* Track Backspace - record char before cursor */
+    if (msg == WM_KEYDOWN && wParam == VK_BACK) {
+        DWORD selStart, selEnd;
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selStart == selEnd && selStart > 0) {
+            /* No selection - deleting char before cursor */
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t ch[2];
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                ch[0] = buf[selStart - 1];
+                ch[1] = 0;
+                Undo_RecordDelete(selStart - 1, ch, 1);
+                LocalFree(buf);
+            }
+        } else if (selEnd > selStart) {
+            /* Selection - record selected text */
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                LocalFree(buf);
+            }
+        }
+    }
 
     /* Global shortcuts first */
     if (HandleGlobalKeys(msg, wParam))
@@ -276,18 +384,60 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     /* Handle Tab key - insert spaces if configured */
     if (msg == WM_CHAR && wParam == '\t' && !g_bUseTabs) {
+        DWORD selStart;
         wchar_t spaces[9];
         int i;
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, 0);
         for (i = 0; i < g_nTabSize && i < 8; i++) spaces[i] = ' ';
         spaces[i] = 0;
+        Undo_RecordInsert(selStart, spaces, i);
         SendMessageW(hwnd, EM_REPLACESEL, TRUE, (LPARAM)spaces);
         return 0;
+    }
+    
+    /* Track typed characters for undo */
+    if (msg == WM_CHAR && wParam >= 32 && GetKeyState(VK_CONTROL) >= 0) {
+        DWORD selStart, selEnd;
+        wchar_t ch[2];
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        /* If there's a selection, it will be replaced - record deletion first */
+        if (selEnd > selStart) {
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                LocalFree(buf);
+            }
+        }
+        ch[0] = (wchar_t)wParam;
+        ch[1] = 0;
+        Undo_RecordInsert(selStart, ch, 1);
+    }
+    
+    /* Track Enter key */
+    if (msg == WM_CHAR && wParam == '\r') {
+        DWORD selStart, selEnd;
+        wchar_t ch[2];
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selEnd > selStart) {
+            int len = GetWindowTextLengthW(hwnd);
+            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+            if (buf) {
+                GetWindowTextW(hwnd, buf, len + 1);
+                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                LocalFree(buf);
+            }
+        }
+        ch[0] = '\r';
+        ch[1] = 0;
+        Undo_RecordInsert(selStart, ch, 1);
     }
 
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
         if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || wParam == 10 || /* Ctrl+A, F, G, H, J */
-            wParam == 14 || wParam == 15 || wParam == 17 || wParam == 18 || wParam == 19 || wParam == 23 || /* Ctrl+N, O, Q, R, S, W */
+            wParam == 14 || wParam == 15 || wParam == 17 || wParam == 18 || wParam == 19 || wParam == 22 || wParam == 23 || wParam == 24 || wParam == 25 || /* Ctrl+N, O, Q, R, S, V, W, X, Y */
             wParam == 26) /* Ctrl+Z */
             return 0;
     }
@@ -2349,15 +2499,56 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case IDM_EDIT_CUT:
+            {
+                DWORD selStart, selEnd;
+                SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+                if (selEnd > selStart) {
+                    int len = GetWindowTextLengthW(g_hwndEdit);
+                    wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+                    if (buf) {
+                        GetWindowTextW(g_hwndEdit, buf, len + 1);
+                        Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                        LocalFree(buf);
+                    }
+                }
+            }
             SendMessageW(g_hwndEdit, WM_CUT, 0, 0);
+            SetFocus(g_hwndEdit);
             return 0;
 
         case IDM_EDIT_COPY:
             SendMessageW(g_hwndEdit, WM_COPY, 0, 0);
+            SetFocus(g_hwndEdit);
             return 0;
 
         case IDM_EDIT_PASTE:
+            {
+                DWORD selStart, selEnd;
+                SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+                /* Record deletion of selection if any */
+                if (selEnd > selStart) {
+                    int len = GetWindowTextLengthW(g_hwndEdit);
+                    wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+                    if (buf) {
+                        GetWindowTextW(g_hwndEdit, buf, len + 1);
+                        Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
+                        LocalFree(buf);
+                    }
+                }
+                /* Get clipboard text to record insert */
+                if (OpenClipboard(hwnd)) {
+                    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                    if (hData) {
+                        wchar_t *pText = (wchar_t *)hData;
+                        if (pText && pText[0]) {
+                            Undo_RecordInsert(selStart, pText, -1);
+                        }
+                    }
+                    CloseClipboard();
+                }
+            }
             SendMessageW(g_hwndEdit, WM_PASTE, 0, 0);
+            SetFocus(g_hwndEdit);
             return 0;
 
         case IDM_EDIT_SELECTALL:
