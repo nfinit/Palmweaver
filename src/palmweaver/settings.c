@@ -23,6 +23,7 @@ extern int g_bUseTabs;
 extern int g_nTabSize;
 extern int g_nColumnLimit;
 extern int g_bQuickNoteStorage;
+extern int g_bQuickNoteAutoInit;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
 extern int g_recentCount;
 
@@ -90,6 +91,10 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"QuickNoteStorage", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bQuickNoteStorage = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"QuickNoteAutoInit", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bQuickNoteAutoInit = (int)val;
 
     /* Load recent files */
     g_recentCount = 0;
@@ -166,6 +171,9 @@ void SaveSettings(void)
     val = (DWORD)g_bQuickNoteStorage;
     RegSetValueExW(hKey, L"QuickNoteStorage", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
+    val = (DWORD)g_bQuickNoteAutoInit;
+    RegSetValueExW(hKey, L"QuickNoteAutoInit", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
     /* Save recent files */
     for (i = 0; i < MAX_RECENT_FILES; i++) {
         wsprintfW(name, L"Recent%d", i);
@@ -219,6 +227,7 @@ void ClearSettings(void)
     g_nTabSize = 4;
     g_nColumnLimit = 80;
     g_bQuickNoteStorage = 0;
+    g_bQuickNoteAutoInit = 0;
     g_recentCount = 0;
 
     /* Prevent SaveSettings from writing on exit */

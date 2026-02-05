@@ -69,7 +69,9 @@ int g_nTabSize = 4;    /* Number of spaces per tab */
 int g_nColumnLimit = 80;  /* Column limit for reflow */
 
 /* Quick Note settings */
-int g_bQuickNoteStorage = 0;  /* Prefer storage card for quick notes */
+int g_bQuickNoteStorage = 0;     /* Prefer storage card for quick notes */
+int g_bQuickNoteAutoInit = 0;    /* Auto-create Notes folder on card without prompt */
+static int s_bSkipStorageCard = 0;  /* Session flag: user chose device memory */
 
 /* Font settings */
 static int g_fontSizes[] = {10, 12, 14, 16};
@@ -1257,6 +1259,7 @@ static HWND g_hwndOptQNStorage = NULL;
 #define IDC_OPT_HIDETASKBAR 108
 #define IDC_OPT_COLUMNLIMIT 109
 #define IDC_OPT_QNSTORAGE   110
+#define IDC_OPT_QNAUTOINIT  111
 
 /* External: settings */
 void ClearSettings(void);
@@ -1287,7 +1290,7 @@ static void UpdateFont(void)
 
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    static HWND hwndFontSize, hwndFixedFont, hwndThemedSel, hwndHideTaskbar;
+    static HWND hwndFontSize, hwndFixedFont, hwndThemedSel, hwndHideTaskbar, hwndQNAutoInit;
 
     switch (msg) {
     case WM_CREATE:
@@ -1337,23 +1340,29 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 160, 66, 130, 20, hwnd, (HMENU)IDC_OPT_QNSTORAGE, g_hInst, NULL);
             SendMessage(g_hwndOptQNStorage, BM_SETCHECK, g_bQuickNoteStorage, 0);
 
-            /* Row 4: Fullscreen and theme options */
+            /* Row 4: Quick note auto-init, fullscreen options */
+            hwndQNAutoInit = CreateWindowW(L"BUTTON", L"Auto-init card folder",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                10, 92, 140, 20, hwnd, (HMENU)IDC_OPT_QNAUTOINIT, g_hInst, NULL);
+            SendMessage(hwndQNAutoInit, BM_SETCHECK, g_bQuickNoteAutoInit, 0);
             hwndHideTaskbar = CreateWindowW(L"BUTTON", L"Hide taskbar in fullscreen",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                10, 92, 165, 20, hwnd, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
+                155, 92, 165, 20, hwnd, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
             SendMessage(hwndHideTaskbar, BM_SETCHECK, g_bHideTaskbar, 0);
+
+            /* Row 5: Theme options */
             hwndThemedSel = CreateWindowW(L"BUTTON", L"Theme highlights",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                180, 92, 115, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
+                10, 118, 115, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
             SendMessage(hwndThemedSel, BM_SETCHECK, g_bThemedSelection, 0);
 
-            /* Row 5: Buttons */
+            /* Row 6: Buttons */
             CreateWindowW(L"BUTTON", L"Clear Settings",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                10, 120, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+                10, 146, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
             CreateWindowW(L"BUTTON", L"OK",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                240, 120, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
+                240, 146, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
         }
         return 0;
@@ -1389,6 +1398,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
             g_bHideTaskbar = (int)SendMessage(hwndHideTaskbar, BM_GETCHECK, 0, 0);
             g_bQuickNoteStorage = (int)SendMessage(g_hwndOptQNStorage, BM_GETCHECK, 0, 0);
+            g_bQuickNoteAutoInit = (int)SendMessage(hwndQNAutoInit, BM_GETCHECK, 0, 0);
 
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
@@ -1430,7 +1440,7 @@ static void DoOptions(void)
 
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        30, 25, 320, 172,
+        30, 25, 320, 200,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
@@ -1963,11 +1973,12 @@ static void DoQuickNote(void)
     wchar_t *pWBuf;
     int len, i;
     int useStorage = 0;
+    int needsInit = 0;
 
     if (!PromptSave()) return;
 
-    /* Check for storage card if preferred */
-    if (g_bQuickNoteStorage) {
+    /* Check for storage card if preferred (and not skipped this session) */
+    if (g_bQuickNoteStorage && !s_bSkipStorageCard) {
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW(L"\\Storage Card*", &fd);
         if (hFind != INVALID_HANDLE_VALUE) {
@@ -1987,11 +1998,23 @@ static void DoQuickNote(void)
             } while (FindNextFileW(hFind, &fd));
             FindClose(hFind);
 
-            /* No Notes folder found - use first card */
+            /* No Notes folder found - would need to create on first card */
             if (!useStorage && firstCard[0]) {
                 wsprintfW(notesDir, L"\\%s\\Notes", firstCard);
+                needsInit = 1;
                 useStorage = 1;
             }
+        }
+    }
+
+    /* Prompt before initializing on storage card (unless auto-init enabled) */
+    if (needsInit && !g_bQuickNoteAutoInit) {
+        int result = MessageBoxW(g_hwndMain,
+            L"Create Notes folder on storage card?\n\nYes = Use card\nNo = Use device memory (this session)",
+            L"Quick Note", MB_YESNO | MB_ICONQUESTION);
+        if (result != IDYES) {
+            s_bSkipStorageCard = 1;
+            useStorage = 0;
         }
     }
 
