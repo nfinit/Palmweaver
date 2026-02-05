@@ -66,6 +66,7 @@ static COLORREF g_origHighlightText;
 /* Tab settings */
 int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
 int g_nTabSize = 4;    /* Number of spaces per tab */
+int g_nColumnLimit = 80;  /* Column limit for reflow */
 
 /* Font settings */
 static int g_fontSizes[] = {10, 12, 14, 16};
@@ -115,6 +116,7 @@ static void DoReplace(void);
 static void DoInsertDateTime(int mode);
 static void DoInsertRule(void);
 static void DoQuickNote(void);
+static void DoReflow(void);
 static void UpdateLineNumbers(void);
 static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
@@ -195,6 +197,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'H') { DoReplace(); return 1; }
         if (wParam == 'R') { DoInsertRule(); return 1; }
         if (wParam == 'Q') { DoQuickNote(); return 1; }
+        if (wParam == 'J') { DoReflow(); return 1; }
         if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
         /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
@@ -264,7 +267,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
-        if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || /* Ctrl+A, F, G, H */
+        if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || wParam == 10 || /* Ctrl+A, F, G, H, J */
             wParam == 14 || wParam == 15 || wParam == 17 || wParam == 18 || wParam == 19 || wParam == 23) /* Ctrl+N, O, Q, R, S, W */
             return 0;
     }
@@ -422,6 +425,7 @@ static void CreateMenuBar(HWND hwndCB)
         AppendMenuW(hMenuInsert, MF_STRING, IDM_EDIT_INSRULE, L"&Horizontal Rule\tCtrl+R");
         AppendMenuW(hMenuEdit, MF_POPUP, (UINT)hMenuInsert, L"&Insert");
     }
+    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_REFLOW, L"Re&flow Paragraph\tCtrl+J");
 
     /* View menu */
     AppendMenuW(hMenuView, MF_STRING | MF_CHECKED, IDM_VIEW_WORDWRAP, L"&Word Wrap\tAlt+W");
@@ -1100,12 +1104,138 @@ static void DoInsertRule(void)
 }
 
 /*
+ * DoReflow - Reflow selected text or current paragraph to column limit
+ */
+static void DoReflow(void)
+{
+    int selStart, selEnd, paraStart, paraEnd;
+    int len, col, i, wordStart;
+    wchar_t *text, *out, *p;
+
+    SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+
+    /* If no selection, find current paragraph */
+    if (selStart == selEnd) {
+        int lineIdx = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
+        int totalLen = GetWindowTextLengthW(g_hwndEdit);
+
+        /* Find paragraph start (search backward for blank line) */
+        paraStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, lineIdx, 0);
+        while (lineIdx > 0) {
+            int prevLine = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, lineIdx - 1, 0);
+            int prevLen = (int)SendMessageW(g_hwndEdit, EM_LINELENGTH, prevLine, 0);
+            if (prevLen == 0) break;
+            lineIdx--;
+            paraStart = prevLine;
+        }
+
+        /* Find paragraph end (search forward for blank line) */
+        lineIdx = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
+        paraEnd = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, lineIdx, 0);
+        paraEnd += (int)SendMessageW(g_hwndEdit, EM_LINELENGTH, paraEnd, 0);
+        while (paraEnd < totalLen) {
+            int nextLine = paraEnd + 2; /* Skip \r\n */
+            int nextLen = (int)SendMessageW(g_hwndEdit, EM_LINELENGTH, nextLine, 0);
+            if (nextLen == 0 || nextLine >= totalLen) break;
+            paraEnd = nextLine + nextLen;
+        }
+
+        selStart = paraStart;
+        selEnd = paraEnd;
+    }
+
+    if (selEnd <= selStart) return;
+
+    len = selEnd - selStart;
+    text = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+    out = (wchar_t *)LocalAlloc(LMEM_FIXED, (len * 2 + 1) * sizeof(wchar_t));
+    if (!text || !out) {
+        if (text) LocalFree(text);
+        if (out) LocalFree(out);
+        return;
+    }
+
+    /* Get selected text via full buffer */
+    {
+        int totalLen = GetWindowTextLengthW(g_hwndEdit);
+        wchar_t *fullText = (wchar_t *)LocalAlloc(LMEM_FIXED, (totalLen + 1) * sizeof(wchar_t));
+        if (!fullText) {
+            LocalFree(text);
+            LocalFree(out);
+            return;
+        }
+        GetWindowTextW(g_hwndEdit, fullText, totalLen + 1);
+        for (i = 0; i < len; i++) text[i] = fullText[selStart + i];
+        text[len] = 0;
+        LocalFree(fullText);
+    }
+
+    /* Select the range for replacement */
+    SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
+
+    /* Reflow: convert line breaks to spaces, then re-wrap */
+    p = out;
+    col = 0;
+    wordStart = -1;
+    for (i = 0; i <= len; i++) {
+        wchar_t ch = text[i];
+
+        /* Convert \r\n to space */
+        if (ch == L'\r') continue;
+        if (ch == L'\n') ch = L' ';
+
+        /* Skip multiple spaces */
+        if (ch == L' ' && (p == out || *(p-1) == L' ' || *(p-1) == L'\n')) continue;
+
+        /* Track word boundaries */
+        if (ch == L' ' || ch == 0) {
+            wordStart = (int)(p - out) + 1;
+        } else if (wordStart < 0 || *(p > out ? p-1 : p) == L' ' || *(p > out ? p-1 : p) == L'\n') {
+            wordStart = (int)(p - out);
+        }
+
+        /* Check if adding this char exceeds limit */
+        if (ch != 0 && col >= g_nColumnLimit && ch != L' ') {
+            /* Wrap before current word if possible */
+            if (wordStart > 0) {
+                wchar_t *ws = out + wordStart;
+                if (ws > out && *(ws-1) == L' ') {
+                    *(ws-1) = L'\r';
+                    /* Insert \n after \r */
+                    { wchar_t *q; for (q = p; q > ws; q--) *q = *(q-1); }
+                    *ws = L'\n';
+                    p++;
+                    col = (int)(p - ws) - 1;
+                    wordStart = (int)(ws - out) + 1;
+                }
+            }
+        }
+
+        if (ch == 0) break;
+        *p++ = ch;
+        col++;
+
+        /* Reset col after line break */
+        if (ch == L'\n') col = 0;
+    }
+    *p = 0;
+
+    /* Replace selection with reflowed text */
+    SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)out);
+
+    LocalFree(text);
+    LocalFree(out);
+    SetFocus(g_hwndEdit);
+}
+
+/*
  * Options dialog
  */
 static HWND g_hwndOptionsDlg = NULL;
 static HWND g_hwndOptUseTabs = NULL;
 static HWND g_hwndOptUseSpaces = NULL;
 static HWND g_hwndOptTabSize = NULL;
+static HWND g_hwndOptColumnLimit = NULL;
 
 #define IDC_OPT_USETABS   101
 #define IDC_OPT_USESPACES 102
@@ -1115,6 +1245,7 @@ static HWND g_hwndOptTabSize = NULL;
 #define IDC_OPT_FIXEDFONT 106
 #define IDC_OPT_THEMEDSEL 107
 #define IDC_OPT_HIDETASKBAR 108
+#define IDC_OPT_COLUMNLIMIT 109
 
 /* External: settings */
 void ClearSettings(void);
@@ -1181,17 +1312,25 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 130, 38, 120, 20, hwnd, (HMENU)IDC_OPT_FIXEDFONT, g_hInst, NULL);
             SendMessage(hwndFixedFont, BM_SETCHECK, g_bFixedFont, 0);
 
-            /* Row 3: Theme option */
-            hwndThemedSel = CreateWindowW(L"BUTTON", L"Theme selection highlight",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                10, 66, 160, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
-            SendMessage(hwndThemedSel, BM_SETCHECK, g_bThemedSelection, 0);
+            /* Row 3: Reflow setting */
+            CreateWindowW(L"STATIC", L"Reflow to",
+                WS_CHILD | WS_VISIBLE, 10, 68, 55, 16, hwnd, NULL, g_hInst, NULL);
+            wsprintfW(buf, L"%d", g_nColumnLimit);
+            g_hwndOptColumnLimit = CreateWindowW(L"EDIT", buf,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
+                68, 66, 30, 20, hwnd, (HMENU)IDC_OPT_COLUMNLIMIT, g_hInst, NULL);
+            CreateWindowW(L"STATIC", L"columns",
+                WS_CHILD | WS_VISIBLE, 102, 68, 45, 16, hwnd, NULL, g_hInst, NULL);
 
-            /* Row 4: Fullscreen option */
+            /* Row 4: Fullscreen and theme options */
             hwndHideTaskbar = CreateWindowW(L"BUTTON", L"Hide taskbar in fullscreen",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                10, 92, 170, 20, hwnd, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
+                10, 92, 165, 20, hwnd, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
             SendMessage(hwndHideTaskbar, BM_SETCHECK, g_bHideTaskbar, 0);
+            hwndThemedSel = CreateWindowW(L"BUTTON", L"Theme highlights",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                180, 92, 115, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
+            SendMessage(hwndThemedSel, BM_SETCHECK, g_bThemedSelection, 0);
 
             /* Row 5: Buttons */
             CreateWindowW(L"BUTTON", L"Clear Settings",
@@ -1199,7 +1338,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 10, 120, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
             CreateWindowW(L"BUTTON", L"OK",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                180, 120, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
+                240, 120, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
         }
         return 0;
@@ -1213,6 +1352,11 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             size = 0;
             { int i; for (i = 0; buf[i]; i++) size = size * 10 + (buf[i] - '0'); }
             if (size >= 1 && size <= 8) g_nTabSize = size;
+
+            GetWindowTextW(g_hwndOptColumnLimit, buf, 8);
+            size = 0;
+            { int i; for (i = 0; buf[i]; i++) size = size * 10 + (buf[i] - '0'); }
+            if (size >= 20 && size <= 200) g_nColumnLimit = size;
 
             newSizeIdx = (int)SendMessageW(hwndFontSize, CB_GETCURSEL, 0, 0);
             newFixed = (int)SendMessage(hwndFixedFont, BM_GETCHECK, 0, 0);
@@ -1270,7 +1414,7 @@ static void DoOptions(void)
 
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        30, 25, 260, 172,
+        30, 25, 320, 172,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
@@ -2022,6 +2166,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_EDIT_INSRULE:
             DoInsertRule();
+            return 0;
+
+        case IDM_EDIT_REFLOW:
+            DoReflow();
             return 0;
 
         case IDM_VIEW_WORDWRAP:

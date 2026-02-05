@@ -7,7 +7,7 @@
 #define RESOURCE_H
 
 /* Version */
-#define PALMWEAVER_VERSION      L"0.3.0.27"
+#define PALMWEAVER_VERSION      L"0.3.0.34"
 
 /* Menu */
 #define IDR_MENU                101
@@ -34,6 +34,7 @@
 #define IDM_EDIT_INSTIME        311
 #define IDM_EDIT_INSDATETIME    312
 #define IDM_EDIT_INSRULE        313
+#define IDM_EDIT_REFLOW         314
 
 /* Menu Items - View */
 #define IDM_VIEW_WORDWRAP       351
