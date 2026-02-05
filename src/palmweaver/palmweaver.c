@@ -199,6 +199,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         }
     }
     if (msg == WM_KEYDOWN && ctrl) {
+        int shift = GetKeyState(VK_SHIFT) < 0;
         if (wParam == 'N') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_NEW, 0); return 1; }
         if (wParam == 'O') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_OPEN, 0); return 1; }
         if (wParam == 'S') { SendMessage(g_hwndMain, WM_COMMAND, IDM_FILE_SAVE, 0); return 1; }
@@ -209,6 +210,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'R') { DoInsertRule(); return 1; }
         if (wParam == 'Q') { DoQuickNote(); return 1; }
         if (wParam == 'J') { DoReflow(); return 1; }
+        if (wParam == 'X' && shift) { SendMessage(g_hwndMain, WM_COMMAND, IDM_EDIT_CUTLINE, 0); return 1; }
         if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
         /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
@@ -222,7 +224,6 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         }
         /* Ctrl+; = Insert Date, Ctrl+Shift+; = Insert Date+Time */
         if (wParam == 0xBA) {  /* VK_OEM_1 = ;/: key */
-            int shift = GetKeyState(VK_SHIFT) < 0;
             DoInsertDateTime(shift ? 2 : 0);
             return 1;
         }
@@ -577,14 +578,23 @@ static void CreateMenuBar(HWND hwndCB)
 
     /* Edit menu */
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_UNDO, L"&Undo\tCtrl+Z");
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_CUT, L"Cu&t\tCtrl+X");
+    {
+        HMENU hMenuCut = CreatePopupMenu();
+        AppendMenuW(hMenuCut, MF_STRING, IDM_EDIT_CUT, L"&Selection\tCtrl+X");
+        AppendMenuW(hMenuCut, MF_STRING, IDM_EDIT_CUTLINE, L"&Line\tCtrl+Shift+X");
+        AppendMenuW(hMenuEdit, MF_POPUP, (UINT)hMenuCut, L"Cu&t...");
+    }
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_COPY, L"&Copy\tCtrl+C");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_PASTE, L"&Paste\tCtrl+V");
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_SELECTALL, L"Select &All\tCtrl+A");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FIND, L"&Find...\tCtrl+F");
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_FINDNEXT, L"Find &Next\tCtrl+3");
-    AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_REPLACE, L"&Replace...\tCtrl+H");
+    {
+        HMENU hMenuFind = CreatePopupMenu();
+        AppendMenuW(hMenuFind, MF_STRING, IDM_EDIT_FIND, L"&Find...\tCtrl+F");
+        AppendMenuW(hMenuFind, MF_STRING, IDM_EDIT_FINDNEXT, L"Find &Next\tCtrl+3");
+        AppendMenuW(hMenuFind, MF_STRING, IDM_EDIT_REPLACE, L"&Replace...\tCtrl+H");
+        AppendMenuW(hMenuEdit, MF_POPUP, (UINT)hMenuFind, L"&Find...");
+    }
     AppendMenuW(hMenuEdit, MF_STRING, IDM_EDIT_GOTOLINE, L"&Go to Line...\tCtrl+G");
     AppendMenuW(hMenuEdit, MF_SEPARATOR, 0, NULL);
     {
@@ -2554,6 +2564,47 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_EDIT_SELECTALL:
             SetFocus(g_hwndEdit);
             SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1);
+            return 0;
+
+        case IDM_EDIT_CUTLINE:
+            {
+                int line, lineStart, lineEnd, len;
+                DWORD sel;
+                SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&sel, 0);
+                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, sel, 0);
+                lineStart = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line, 0);
+                lineEnd = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line + 1, 0);
+                len = GetWindowTextLengthW(g_hwndEdit);
+                if (lineEnd < 0) lineEnd = len;  /* Last line */
+                if (lineEnd > lineStart) {
+                    wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+                    if (buf) {
+                        int lineLen = lineEnd - lineStart;
+                        GetWindowTextW(g_hwndEdit, buf, len + 1);
+                        Undo_RecordDelete(lineStart, buf + lineStart, lineLen);
+                        /* Copy to clipboard */
+                        if (OpenClipboard(hwnd)) {
+                            HLOCAL hMem = LocalAlloc(LMEM_MOVEABLE, (lineLen + 1) * sizeof(wchar_t));
+                            if (hMem) {
+                                wchar_t *p = (wchar_t *)LocalLock(hMem);
+                                int i;
+                                for (i = 0; i < lineLen; i++) p[i] = buf[lineStart + i];
+                                p[lineLen] = 0;
+                                LocalUnlock(hMem);
+                                EmptyClipboard();
+                                SetClipboardData(CF_UNICODETEXT, hMem);
+                            }
+                            CloseClipboard();
+                        }
+                        LocalFree(buf);
+                    }
+                    SendMessage(g_hwndEdit, EM_SETSEL, lineStart, lineEnd);
+                    SendMessage(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"");
+                    g_bDirty = 1;
+                    UpdateTitle();
+                }
+                SetFocus(g_hwndEdit);
+            }
             return 0;
 
         case IDM_EDIT_FIND:
