@@ -103,6 +103,57 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
     }
     s_redoCount = 0;
 
+    /* Try to coalesce with previous entry for single-char operations */
+    if (len == 1 && s_undoCount > 0) {
+        e = &s_undoStack[s_undoCount - 1];
+        
+        /* Coalesce consecutive inserts (typing) */
+        if (type == UNDO_INSERT && e->type == UNDO_INSERT && 
+            pos == e->pos + e->len && e->len < UNDO_MAX_TEXT) {
+            wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
+            if (newText) {
+                for (i = 0; i < e->len; i++) newText[i] = e->text[i];
+                newText[e->len] = text[0];
+                newText[e->len + 1] = 0;
+                LocalFree(e->text);
+                e->text = newText;
+                e->len++;
+                return;
+            }
+        }
+        
+        /* Coalesce consecutive backspaces (deleting backward) */
+        if (type == UNDO_DELETE && e->type == UNDO_DELETE &&
+            pos == e->pos - 1 && e->len < UNDO_MAX_TEXT) {
+            wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
+            if (newText) {
+                newText[0] = text[0];
+                for (i = 0; i < e->len; i++) newText[i + 1] = e->text[i];
+                newText[e->len + 1] = 0;
+                LocalFree(e->text);
+                e->text = newText;
+                e->pos = pos;
+                e->len++;
+                return;
+            }
+        }
+        
+        /* Coalesce consecutive deletes (Delete key at same position) */
+        if (type == UNDO_DELETE && e->type == UNDO_DELETE &&
+            pos == e->pos && e->len < UNDO_MAX_TEXT) {
+            wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
+            if (newText) {
+                for (i = 0; i < e->len; i++) newText[i] = e->text[i];
+                newText[e->len] = text[0];
+                newText[e->len + 1] = 0;
+                LocalFree(e->text);
+                e->text = newText;
+                e->len++;
+                return;
+            }
+        }
+    }
+
     /* If stack is full, shift everything down (discard oldest) */
     if (s_undoCount >= UNDO_MAX_ENTRIES) {
         FreeEntry(&s_undoStack[0]);
