@@ -2174,19 +2174,49 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case IDM_VIEW_WORDWRAP:
             {
-                LONG style = GetWindowLong(g_hwndEdit, GWL_STYLE);
-                g_bWordWrap = !g_bWordWrap;
-                if (g_bWordWrap) {
-                    style &= ~(WS_HSCROLL | ES_AUTOHSCROLL);
-                    CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP, MF_CHECKED);
-                } else {
-                    style |= ES_AUTOHSCROLL;
-                    if (g_bShowScrollbars) style |= WS_HSCROLL;
-                    CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP, MF_UNCHECKED);
+                /* Must recreate edit control to change word wrap on CE */
+                int textLen = GetWindowTextLengthW(g_hwndEdit);
+                wchar_t *text = NULL;
+                DWORD editStyle;
+                int selStart, selEnd;
+
+                /* Save text and selection */
+                if (textLen > 0) {
+                    text = (wchar_t *)LocalAlloc(LMEM_FIXED, (textLen + 1) * sizeof(wchar_t));
+                    if (text) GetWindowTextW(g_hwndEdit, text, textLen + 1);
                 }
-                SetWindowLong(g_hwndEdit, GWL_STYLE, style);
-                SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+
+                g_bWordWrap = !g_bWordWrap;
+                CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP,
+                    g_bWordWrap ? MF_CHECKED : MF_UNCHECKED);
+
+                /* Destroy old edit */
+                DestroyWindow(g_hwndEdit);
+
+                /* Recreate with new style */
+                editStyle = WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL;
+                if (g_bShowScrollbars) {
+                    editStyle |= WS_VSCROLL;
+                    if (!g_bWordWrap) editStyle |= WS_HSCROLL;
+                }
+                if (!g_bWordWrap) editStyle |= ES_AUTOHSCROLL;
+
+                g_hwndEdit = CreateWindowW(L"EDIT", NULL, editStyle,
+                    0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
+                SendMessage(g_hwndEdit, EM_SETMARGINS, EC_LEFTMARGIN, MAKELONG(2, 0));
+                SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+                g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
+                    (LONG)EditSubclassProc);
+
+                /* Restore text and selection */
+                if (text) {
+                    SetWindowTextW(g_hwndEdit, text);
+                    LocalFree(text);
+                }
+                SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
+
+                SendMessage(hwnd, WM_SIZE, 0, 0);
                 UpdateLineNumbers();
                 SetFocus(g_hwndEdit);
             }
