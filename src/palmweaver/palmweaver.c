@@ -1928,9 +1928,27 @@ static void DoQuickNote(void)
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW(L"\\Storage Card*", &fd);
         if (hFind != INVALID_HANDLE_VALUE) {
-            wsprintfW(notesDir, L"\\%s\\Notes", fd.cFileName);
+            wchar_t testPath[MAX_PATH];
+            wchar_t firstCard[MAX_PATH];
+            firstCard[0] = 0;
+
+            /* Scan cards, prefer one with existing Notes folder */
+            do {
+                if (!firstCard[0]) lstrcpyW(firstCard, fd.cFileName);
+                wsprintfW(testPath, L"\\%s\\Notes", fd.cFileName);
+                if (GetFileAttributesW(testPath) != 0xFFFFFFFF) {
+                    lstrcpyW(notesDir, testPath);
+                    useStorage = 1;
+                    break;
+                }
+            } while (FindNextFileW(hFind, &fd));
             FindClose(hFind);
-            useStorage = 1;
+
+            /* No Notes folder found - use first card */
+            if (!useStorage && firstCard[0]) {
+                wsprintfW(notesDir, L"\\%s\\Notes", firstCard);
+                useStorage = 1;
+            }
         }
     }
 
