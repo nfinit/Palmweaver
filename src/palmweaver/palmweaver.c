@@ -722,6 +722,7 @@ static void DoFindNext(void)
     wchar_t *buf;
     wchar_t msg[64];
     DWORD sel;
+    int line, col;
 
     if (!g_findText[0]) return;
 
@@ -745,7 +746,9 @@ static void DoFindNext(void)
         if (j == findLen) {
             SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
             SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-            wsprintfW(msg, L"Found at position %d", i);
+            line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
+            col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
+            wsprintfW(msg, L"Found at Ln %d, Col %d", line, col);
             SetStatusMessage(msg);
             LocalFree(buf);
             return;
@@ -758,7 +761,9 @@ static void DoFindNext(void)
         if (j == findLen) {
             SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
             SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-            wsprintfW(msg, L"Found at position %d (wrapped)", i);
+            line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
+            col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
+            wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped)", line, col);
             SetStatusMessage(msg);
             LocalFree(buf);
             return;
@@ -868,16 +873,22 @@ static void DoReplaceOne(void)
     DWORD selStart, selEnd;
     int selLen, findLen, i, match = 1;
     wchar_t *buf;
-    int len;
+    wchar_t msg[80];
+    int len, replLine, replCol, nextLine, nextCol;
 
     if (!g_findText[0]) return;
 
-    SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-    if (selEnd <= selStart) { DoFindNext(); return; }
-
-    selLen = selEnd - selStart;
     findLen = lstrlenW(g_findText);
-    if (selLen != findLen) { DoFindNext(); return; }
+    SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    selLen = selEnd - selStart;
+    
+    /* If no selection or wrong length, find first */
+    if (selLen != findLen) {
+        DoFindNext();
+        SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        selLen = selEnd - selStart;
+        if (selLen != findLen) return;  /* Nothing found */
+    }
 
     len = GetWindowTextLengthW(g_hwndEdit);
     buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
@@ -889,12 +900,29 @@ static void DoReplaceOne(void)
     }
 
     if (match) {
+        replLine = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0) + 1;
+        replCol = selStart - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, replLine - 1, 0) + 1;
+        
         /* Record undo: delete found text, insert replacement */
         Undo_RecordDelete(selStart, buf + selStart, selLen);
         Undo_RecordInsert(selStart, g_replaceText, -1);
         SendMessage(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)g_replaceText);
         g_bDirty = 1;
         UpdateTitle();
+        LocalFree(buf);
+        
+        /* Find next and show combined message */
+        DoFindNext();
+        SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selEnd > selStart) {
+            nextLine = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0) + 1;
+            nextCol = selStart - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, nextLine - 1, 0) + 1;
+            wsprintfW(msg, L"Replaced Ln %d Col %d, next Ln %d Col %d", replLine, replCol, nextLine, nextCol);
+        } else {
+            wsprintfW(msg, L"Replaced Ln %d Col %d, no more matches", replLine, replCol);
+        }
+        SetStatusMessage(msg);
+        return;
     }
     LocalFree(buf);
     DoFindNext();
