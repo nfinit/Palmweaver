@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include "resource.h"
+#include "undo.h"
 
 /*
  * CE SDK header gaps - these constants exist in desktop Windows headers but
@@ -243,6 +244,14 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
  */
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    /* Intercept Ctrl+Z before Edit control's default handler */
+    if (msg == WM_KEYDOWN && wParam == 'Z' && GetKeyState(VK_CONTROL) < 0) {
+        if (!Undo_Perform()) {
+            SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
+        }
+        return 0;
+    }
+
     /* Global shortcuts first */
     if (HandleGlobalKeys(msg, wParam))
         return 0;
@@ -278,7 +287,8 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
         if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || wParam == 10 || /* Ctrl+A, F, G, H, J */
-            wParam == 14 || wParam == 15 || wParam == 17 || wParam == 18 || wParam == 19 || wParam == 23) /* Ctrl+N, O, Q, R, S, W */
+            wParam == 14 || wParam == 15 || wParam == 17 || wParam == 18 || wParam == 19 || wParam == 23 || /* Ctrl+N, O, Q, R, S, W */
+            wParam == 26) /* Ctrl+Z */
             return 0;
     }
 
@@ -872,13 +882,16 @@ static void DoReplaceOne(void)
     for (i = 0; i < selLen && match; i++) {
         if (!CharsMatch(buf[selStart + i], g_findText[i])) match = 0;
     }
-    LocalFree(buf);
 
     if (match) {
+        /* Record undo: delete found text, insert replacement */
+        Undo_RecordDelete(selStart, buf + selStart, selLen);
+        Undo_RecordInsert(selStart, g_replaceText, -1);
         SendMessage(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)g_replaceText);
         g_bDirty = 1;
         UpdateTitle();
     }
+    LocalFree(buf);
     DoFindNext();
 }
 
@@ -929,6 +942,10 @@ static int DoReplaceAll(void)
         }
         *p++ = buf[i];
     }
+
+    /* Record undo: delete all, insert new */
+    Undo_RecordDelete(0, buf, len);
+    Undo_RecordInsert(0, newBuf, -1);
 
     SetWindowTextW(g_hwndEdit, newBuf);
     g_bDirty = 1;
@@ -1061,6 +1078,7 @@ static void DoInsertDateTime(int mode)
 {
     SYSTEMTIME st;
     wchar_t buf[64];
+    int pos;
 
     GetLocalTime(&st);
 
@@ -1077,7 +1095,10 @@ static void DoInsertDateTime(int mode)
     }
 
     SetFocus(g_hwndEdit);
+    SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&pos, (LPARAM)NULL);
+    Undo_RecordInsert(pos, buf, -1);
     SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)buf);
+    g_bDirty = 1;
 }
 
 /*
@@ -1114,7 +1135,9 @@ static void DoInsertRule(void)
     *p = 0;
 
     SetFocus(g_hwndEdit);
+    Undo_RecordInsert(selStart, buf, -1);
     SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)buf);
+    g_bDirty = 1;
 }
 
 /*
@@ -1234,8 +1257,13 @@ static void DoReflow(void)
     }
     *p = 0;
 
+    /* Record undo: delete original, insert new */
+    Undo_RecordDelete(selStart, text, len);
+    Undo_RecordInsert(selStart, out, -1);
+
     /* Replace selection with reflowed text */
     SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)out);
+    g_bDirty = 1;
 
     LocalFree(text);
     LocalFree(out);
@@ -1857,6 +1885,7 @@ static void DoFileNew(void)
     SetWindowTextW(g_hwndEdit, L"");
     g_szFilePath[0] = 0;
     g_bDirty = 0;
+    Undo_Clear();
     UpdateTitle();
     UpdateLineNumbers();
 }
@@ -1925,6 +1954,7 @@ static int DoFileOpen(void)
 
     lstrcpyW(g_szFilePath, szFile);
     g_bDirty = 0;
+    Undo_Clear();
     UpdateTitle();
     UpdateLineNumbers();
     AddRecentFile(szFile);
@@ -2220,6 +2250,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
                 (LONG)EditSubclassProc);
 
+            /* Initialize undo system */
+            Undo_Init(g_hwndEdit);
+
             SetFocus(g_hwndEdit);
             UpdateTitle();
             UpdateStatus();
@@ -2275,7 +2308,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
 
         case IDM_EDIT_UNDO:
-            SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
+            if (!Undo_Perform()) {
+                /* Fall back to built-in undo for user typing */
+                SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
+            }
             return 0;
 
         case IDM_EDIT_CUT:
@@ -2367,6 +2403,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
                 g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
                     (LONG)EditSubclassProc);
+
+                /* Re-init undo with new edit control (preserves history) */
+                Undo_Init(g_hwndEdit);
 
                 /* Restore text and selection */
                 if (text) {
