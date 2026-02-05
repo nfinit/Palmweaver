@@ -114,6 +114,7 @@ static void DoFindNext(void);
 static void DoReplace(void);
 static void DoInsertDateTime(int mode);
 static void DoInsertRule(void);
+static void DoQuickNote(void);
 static void UpdateLineNumbers(void);
 static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
@@ -193,6 +194,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
         if (wParam == 'R') { DoInsertRule(); return 1; }
+        if (wParam == 'Q') { DoQuickNote(); return 1; }
         if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
         if (wParam == '3') { DoFindNext(); return 1; }
         /* Zoom: Ctrl+Plus/Minus or Ctrl+=/- */
@@ -263,7 +265,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
     if (msg == WM_CHAR && GetKeyState(VK_CONTROL) < 0) {
         if (wParam == 1 || wParam == 6 || wParam == 7 || wParam == 8 || /* Ctrl+A, F, G, H */
-            wParam == 14 || wParam == 15 || wParam == 18 || wParam == 19 || wParam == 23) /* Ctrl+N, O, R, S, W */
+            wParam == 14 || wParam == 15 || wParam == 17 || wParam == 18 || wParam == 19 || wParam == 23) /* Ctrl+N, O, Q, R, S, W */
             return 0;
     }
 
@@ -1748,6 +1750,76 @@ static int DoFileSaveAs(void)
         return 1;
     }
     return 0;
+}
+
+/*
+ * DoQuickNote - Open/create today's dated note file
+ */
+static void DoQuickNote(void)
+{
+    SYSTEMTIME st;
+    wchar_t path[MAX_PATH];
+    HANDLE hFile;
+    DWORD dwSize, dwRead;
+    char *pBuf;
+    wchar_t *pWBuf;
+    int len, i;
+
+    if (!PromptSave()) return;
+
+    GetLocalTime(&st);
+    wsprintfW(path, L"\\My Documents\\%04d-%02d-%02d.txt",
+        st.wYear, st.wMonth, st.wDay);
+
+    /* Try to open existing file */
+    hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if (hFile != INVALID_HANDLE_VALUE) {
+        /* Load existing content */
+        dwSize = GetFileSize(hFile, NULL);
+        pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 2);
+        if (pBuf) {
+            ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
+            CloseHandle(hFile);
+            pBuf[dwRead] = 0;
+            pBuf[dwRead + 1] = 0;
+
+            /* Check for UTF-16 BOM */
+            if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
+                SetWindowTextW(g_hwndEdit, (wchar_t *)(pBuf + 2));
+            } else {
+                /* Convert ANSI to Unicode */
+                len = dwRead;
+                pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+                if (pWBuf) {
+                    for (i = 0; i < len; i++) pWBuf[i] = (unsigned char)pBuf[i];
+                    pWBuf[len] = 0;
+                    SetWindowTextW(g_hwndEdit, pWBuf);
+                    LocalFree(pWBuf);
+                }
+            }
+            LocalFree(pBuf);
+        } else {
+            CloseHandle(hFile);
+        }
+    } else {
+        /* New file - start empty */
+        SetWindowTextW(g_hwndEdit, L"");
+    }
+
+    lstrcpyW(g_szFilePath, path);
+    g_bDirty = 0;
+    UpdateTitle();
+
+    /* Move cursor to end and add newline if content exists */
+    len = GetWindowTextLengthW(g_hwndEdit);
+    SendMessageW(g_hwndEdit, EM_SETSEL, len, len);
+    if (len > 0) {
+        SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
+    }
+    SetFocus(g_hwndEdit);
+    UpdateStatus();
 }
 
 /*
