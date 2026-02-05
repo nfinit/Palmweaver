@@ -1758,17 +1758,25 @@ static int DoFileSaveAs(void)
 static void DoQuickNote(void)
 {
     SYSTEMTIME st;
+    wchar_t notesDir[MAX_PATH];
     wchar_t path[MAX_PATH];
     HANDLE hFile;
-    DWORD dwSize, dwRead;
+    DWORD dwSize, dwRead, attr;
     char *pBuf;
     wchar_t *pWBuf;
     int len, i;
 
     if (!PromptSave()) return;
 
+    /* Ensure Notes directory exists */
+    lstrcpyW(notesDir, L"\\My Documents\\Notes");
+    attr = GetFileAttributesW(notesDir);
+    if (attr == 0xFFFFFFFF) {
+        CreateDirectoryW(notesDir, NULL);
+    }
+
     GetLocalTime(&st);
-    wsprintfW(path, L"\\My Documents\\%04d-%02d-%02d.txt",
+    wsprintfW(path, L"%s\\%04d-%02d-%02d.txt", notesDir,
         st.wYear, st.wMonth, st.wDay);
 
     /* Try to open existing file */
