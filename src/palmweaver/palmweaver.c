@@ -679,6 +679,9 @@ static void DoGotoLine(void)
 #ifndef WS_EX_TOOLWINDOW
 #define WS_EX_TOOLWINDOW 0x00000080L  /* Extended style for floating tool windows - missing from CE 2.0 headers */
 #endif
+#ifndef WS_EX_CAPTIONOKBTN
+#define WS_EX_CAPTIONOKBTN 0x80000000L  /* OK button in title bar - CE specific */
+#endif
     g_hwndGotoDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverGoto", L"Go to Line",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         rc.left + 20, rc.top + 50, 155, 52,
@@ -1247,8 +1250,9 @@ static HWND g_hwndOptUseTabs = NULL;
 static HWND g_hwndOptUseSpaces = NULL;
 static HWND g_hwndOptTabSize = NULL;
 static HWND g_hwndOptColumnLimit = NULL;
-static HWND g_hwndOptQNStorage = NULL;
-
+static HWND g_hwndOptFixedFont = NULL;
+/* Options dialog control IDs */
+#define IDC_OPT_TAB       100
 #define IDC_OPT_USETABS   101
 #define IDC_OPT_USESPACES 102
 #define IDC_OPT_TABSIZE   103
@@ -1288,82 +1292,126 @@ static void UpdateFont(void)
     }
 }
 
+/* Options dialog - tabbed layout */
+static HWND g_hwndOptTab = NULL;
+static HWND g_optEditorCtrls[8];   /* Editor tab controls */
+static HWND g_optDisplayCtrls[5];  /* Display tab controls */
+static HWND g_optStorageCtrls[2];  /* Storage tab controls */
+
+static void ShowOptionsTab(int tab)
+{
+    int i;
+    for (i = 0; i < 8; i++) ShowWindow(g_optEditorCtrls[i], tab == 0 ? SW_SHOW : SW_HIDE);
+    for (i = 0; i < 5; i++) ShowWindow(g_optDisplayCtrls[i], tab == 1 ? SW_SHOW : SW_HIDE);
+    for (i = 0; i < 2; i++) ShowWindow(g_optStorageCtrls[i], tab == 2 ? SW_SHOW : SW_HIDE);
+}
+
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    static HWND hwndFontSize, hwndFixedFont, hwndThemedSel, hwndHideTaskbar, hwndQNAutoInit;
-
     switch (msg) {
     case WM_CREATE:
         {
+            TCITEMW tci = {0};
+            RECT tabRc;
             wchar_t buf[8];
-            /* Row 1: Indentation */
-            CreateWindowW(L"STATIC", L"Indentation:",
-                WS_CHILD | WS_VISIBLE, 10, 12, 70, 16, hwnd, NULL, g_hInst, NULL);
-            g_hwndOptUseTabs = CreateWindowW(L"BUTTON", L"Tabs",
-                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                85, 10, 50, 20, hwnd, (HMENU)IDC_OPT_USETABS, g_hInst, NULL);
-            g_hwndOptUseSpaces = CreateWindowW(L"BUTTON", L"Spaces:",
-                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                140, 10, 60, 20, hwnd, (HMENU)IDC_OPT_USESPACES, g_hInst, NULL);
+            int x, y;
+
+            /* Tab control */
+            g_hwndOptTab = CreateWindowW(WC_TABCONTROLW, NULL,
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                4, 4, 282, 110, hwnd, (HMENU)IDC_OPT_TAB, g_hInst, NULL);
+            tci.mask = TCIF_TEXT;
+            tci.pszText = L"Editor";
+            SendMessage(g_hwndOptTab, TCM_INSERTITEMW, 0, (LPARAM)&tci);
+            tci.pszText = L"Display";
+            SendMessage(g_hwndOptTab, TCM_INSERTITEMW, 1, (LPARAM)&tci);
+            tci.pszText = L"Storage";
+            SendMessage(g_hwndOptTab, TCM_INSERTITEMW, 2, (LPARAM)&tci);
+
+            /* Get tab content area */
+            SetRect(&tabRc, 0, 0, 282, 110);
+            SendMessage(g_hwndOptTab, TCM_ADJUSTRECT, FALSE, (LPARAM)&tabRc);
+            x = tabRc.left + 4;
+            y = tabRc.top + 2;
+
+            /* Editor tab: Indentation, Reflow, Clear Settings */
+            g_optEditorCtrls[0] = CreateWindowW(L"STATIC", L"Indent:",
+                WS_CHILD, x, y + 2, 40, 16, g_hwndOptTab, NULL, g_hInst, NULL);
+            g_optEditorCtrls[1] = CreateWindowW(L"BUTTON", L"Tabs",
+                WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
+                x + 42, y, 45, 20, g_hwndOptTab, (HMENU)IDC_OPT_USETABS, g_hInst, NULL);
+            g_hwndOptUseTabs = g_optEditorCtrls[1];
+            g_optEditorCtrls[2] = CreateWindowW(L"BUTTON", L"Spaces:",
+                WS_CHILD | BS_AUTORADIOBUTTON,
+                x + 90, y, 58, 20, g_hwndOptTab, (HMENU)IDC_OPT_USESPACES, g_hInst, NULL);
+            g_hwndOptUseSpaces = g_optEditorCtrls[2];
             wsprintfW(buf, L"%d", g_nTabSize);
-            g_hwndOptTabSize = CreateWindowW(L"EDIT", buf,
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                202, 10, 25, 20, hwnd, (HMENU)IDC_OPT_TABSIZE, g_hInst, NULL);
+            g_optEditorCtrls[3] = CreateWindowW(L"EDIT", buf,
+                WS_CHILD | WS_BORDER | ES_NUMBER,
+                x + 150, y, 22, 20, g_hwndOptTab, (HMENU)IDC_OPT_TABSIZE, g_hInst, NULL);
+            g_hwndOptTabSize = g_optEditorCtrls[3];
 
-            /* Row 2: Font */
-            CreateWindowW(L"STATIC", L"Font size:",
-                WS_CHILD | WS_VISIBLE, 10, 40, 55, 16, hwnd, NULL, g_hInst, NULL);
-            hwndFontSize = CreateWindowW(L"COMBOBOX", NULL,
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                70, 37, 50, 80, hwnd, (HMENU)IDC_OPT_FONTSIZE, g_hInst, NULL);
-            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"10");
-            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"12");
-            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"14");
-            SendMessageW(hwndFontSize, CB_ADDSTRING, 0, (LPARAM)L"16");
-            SendMessageW(hwndFontSize, CB_SETCURSEL, g_fontSizeIdx, 0);
-            hwndFixedFont = CreateWindowW(L"BUTTON", L"Fixed width font",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                130, 38, 120, 20, hwnd, (HMENU)IDC_OPT_FIXEDFONT, g_hInst, NULL);
-            SendMessage(hwndFixedFont, BM_SETCHECK, g_bFixedFont, 0);
-
-            /* Row 3: Reflow setting */
-            CreateWindowW(L"STATIC", L"Reflow to",
-                WS_CHILD | WS_VISIBLE, 10, 68, 55, 16, hwnd, NULL, g_hInst, NULL);
+            g_optEditorCtrls[4] = CreateWindowW(L"STATIC", L"Reflow to",
+                WS_CHILD, x, y + 26, 55, 16, g_hwndOptTab, NULL, g_hInst, NULL);
             wsprintfW(buf, L"%d", g_nColumnLimit);
-            g_hwndOptColumnLimit = CreateWindowW(L"EDIT", buf,
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER,
-                68, 66, 30, 20, hwnd, (HMENU)IDC_OPT_COLUMNLIMIT, g_hInst, NULL);
-            CreateWindowW(L"STATIC", L"columns",
-                WS_CHILD | WS_VISIBLE, 102, 68, 45, 16, hwnd, NULL, g_hInst, NULL);
-            g_hwndOptQNStorage = CreateWindowW(L"BUTTON", L"Quick notes to card",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                160, 66, 130, 20, hwnd, (HMENU)IDC_OPT_QNSTORAGE, g_hInst, NULL);
-            SendMessage(g_hwndOptQNStorage, BM_SETCHECK, g_bQuickNoteStorage, 0);
+            g_optEditorCtrls[5] = CreateWindowW(L"EDIT", buf,
+                WS_CHILD | WS_BORDER | ES_NUMBER,
+                x + 55, y + 24, 30, 20, g_hwndOptTab, (HMENU)IDC_OPT_COLUMNLIMIT, g_hInst, NULL);
+            g_hwndOptColumnLimit = g_optEditorCtrls[5];
+            g_optEditorCtrls[6] = CreateWindowW(L"STATIC", L"columns",
+                WS_CHILD, x + 88, y + 26, 45, 16, g_hwndOptTab, NULL, g_hInst, NULL);
+            g_optEditorCtrls[7] = CreateWindowW(L"BUTTON", L"Clear Settings and Registry...",
+                WS_CHILD | BS_PUSHBUTTON,
+                x, y + 50, 175, 22, g_hwndOptTab, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
 
-            /* Row 4: Quick note auto-init, fullscreen options */
-            hwndQNAutoInit = CreateWindowW(L"BUTTON", L"Auto-init card folder",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                10, 92, 140, 20, hwnd, (HMENU)IDC_OPT_QNAUTOINIT, g_hInst, NULL);
-            SendMessage(hwndQNAutoInit, BM_SETCHECK, g_bQuickNoteAutoInit, 0);
-            hwndHideTaskbar = CreateWindowW(L"BUTTON", L"Hide taskbar in fullscreen",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                155, 92, 165, 20, hwnd, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
-            SendMessage(hwndHideTaskbar, BM_SETCHECK, g_bHideTaskbar, 0);
-
-            /* Row 5: Theme options */
-            hwndThemedSel = CreateWindowW(L"BUTTON", L"Theme highlights",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                10, 118, 115, 20, hwnd, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
-            SendMessage(hwndThemedSel, BM_SETCHECK, g_bThemedSelection, 0);
-
-            /* Row 6: Buttons */
-            CreateWindowW(L"BUTTON", L"Clear Settings",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                10, 146, 100, 24, hwnd, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
-            CreateWindowW(L"BUTTON", L"OK",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                240, 146, 50, 24, hwnd, (HMENU)IDOK, g_hInst, NULL);
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
+
+            /* Display tab: Font, Theme highlights, Hide taskbar */
+            g_optDisplayCtrls[0] = CreateWindowW(L"STATIC", L"Font:",
+                WS_CHILD, x, y + 2, 35, 16, g_hwndOptTab, NULL, g_hInst, NULL);
+            g_optDisplayCtrls[1] = CreateWindowW(L"COMBOBOX", NULL,
+                WS_CHILD | CBS_DROPDOWNLIST,
+                x + 35, y, 45, 80, g_hwndOptTab, (HMENU)IDC_OPT_FONTSIZE, g_hInst, NULL);
+            SendMessageW(g_optDisplayCtrls[1], CB_ADDSTRING, 0, (LPARAM)L"10");
+            SendMessageW(g_optDisplayCtrls[1], CB_ADDSTRING, 0, (LPARAM)L"12");
+            SendMessageW(g_optDisplayCtrls[1], CB_ADDSTRING, 0, (LPARAM)L"14");
+            SendMessageW(g_optDisplayCtrls[1], CB_ADDSTRING, 0, (LPARAM)L"16");
+            SendMessageW(g_optDisplayCtrls[1], CB_SETCURSEL, g_fontSizeIdx, 0);
+            g_optDisplayCtrls[2] = CreateWindowW(L"BUTTON", L"Fixed width",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x + 85, y, 90, 20, g_hwndOptTab, (HMENU)IDC_OPT_FIXEDFONT, g_hInst, NULL);
+            g_hwndOptFixedFont = g_optDisplayCtrls[2];
+            SendMessage(g_hwndOptFixedFont, BM_SETCHECK, g_bFixedFont, 0);
+
+            g_optDisplayCtrls[3] = CreateWindowW(L"BUTTON", L"Theme selection highlights",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x, y + 24, 180, 20, g_hwndOptTab, (HMENU)IDC_OPT_THEMEDSEL, g_hInst, NULL);
+            SendMessage(g_optDisplayCtrls[3], BM_SETCHECK, g_bThemedSelection, 0);
+            g_optDisplayCtrls[4] = CreateWindowW(L"BUTTON", L"Hide taskbar in fullscreen",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x, y + 48, 180, 20, g_hwndOptTab, (HMENU)IDC_OPT_HIDETASKBAR, g_hInst, NULL);
+            SendMessage(g_optDisplayCtrls[4], BM_SETCHECK, g_bHideTaskbar, 0);
+
+            /* Storage tab: Quick note options */
+            g_optStorageCtrls[0] = CreateWindowW(L"BUTTON", L"Prefer storage card for quick notes",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x, y, 220, 20, g_hwndOptTab, (HMENU)IDC_OPT_QNSTORAGE, g_hInst, NULL);
+            SendMessage(g_optStorageCtrls[0], BM_SETCHECK, g_bQuickNoteStorage, 0);
+            g_optStorageCtrls[1] = CreateWindowW(L"BUTTON", L"Auto initialize folders on card",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x, y + 24, 195, 20, g_hwndOptTab, (HMENU)IDC_OPT_QNAUTOINIT, g_hInst, NULL);
+            SendMessage(g_optStorageCtrls[1], BM_SETCHECK, g_bQuickNoteAutoInit, 0);
+
+            ShowOptionsTab(0);
+        }
+        return 0;
+
+    case WM_NOTIFY:
+        {
+            NMHDR *nmh = (NMHDR *)lParam;
+            if (nmh->idFrom == IDC_OPT_TAB && nmh->code == TCN_SELCHANGE) {
+                ShowOptionsTab(TabCtrl_GetCurSel(g_hwndOptTab));
+            }
         }
         return 0;
 
@@ -1371,6 +1419,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (LOWORD(wParam) == IDOK) {
             wchar_t buf[8];
             int size, newSizeIdx, newFixed, newThemedSel;
+
             g_bUseTabs = (int)SendMessage(g_hwndOptUseTabs, BM_GETCHECK, 0, 0);
             GetWindowTextW(g_hwndOptTabSize, buf, 8);
             size = 0;
@@ -1382,23 +1431,23 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             { int i; for (i = 0; buf[i]; i++) size = size * 10 + (buf[i] - '0'); }
             if (size >= 20 && size <= 200) g_nColumnLimit = size;
 
-            newSizeIdx = (int)SendMessageW(hwndFontSize, CB_GETCURSEL, 0, 0);
-            newFixed = (int)SendMessage(hwndFixedFont, BM_GETCHECK, 0, 0);
+            newSizeIdx = (int)SendMessageW(g_optDisplayCtrls[1], CB_GETCURSEL, 0, 0);
+            newFixed = (int)SendMessage(g_hwndOptFixedFont, BM_GETCHECK, 0, 0);
             if (newSizeIdx != g_fontSizeIdx || newFixed != g_bFixedFont) {
                 g_fontSizeIdx = newSizeIdx;
                 g_bFixedFont = newFixed;
                 UpdateFont();
             }
 
-            newThemedSel = (int)SendMessage(hwndThemedSel, BM_GETCHECK, 0, 0);
+            newThemedSel = (int)SendMessage(g_optDisplayCtrls[3], BM_GETCHECK, 0, 0);
             if (newThemedSel != g_bThemedSelection) {
                 if (!newThemedSel) RestoreSelectionColors();
                 g_bThemedSelection = newThemedSel;
             }
 
-            g_bHideTaskbar = (int)SendMessage(hwndHideTaskbar, BM_GETCHECK, 0, 0);
-            g_bQuickNoteStorage = (int)SendMessage(g_hwndOptQNStorage, BM_GETCHECK, 0, 0);
-            g_bQuickNoteAutoInit = (int)SendMessage(hwndQNAutoInit, BM_GETCHECK, 0, 0);
+            g_bHideTaskbar = (int)SendMessage(g_optDisplayCtrls[4], BM_GETCHECK, 0, 0);
+            g_bQuickNoteStorage = (int)SendMessage(g_optStorageCtrls[0], BM_GETCHECK, 0, 0);
+            g_bQuickNoteAutoInit = (int)SendMessage(g_optStorageCtrls[1], BM_GETCHECK, 0, 0);
 
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
@@ -1438,9 +1487,9 @@ static void DoOptions(void)
     wc.lpszClassName = L"PalmweaverOptions";
     RegisterClassW(&wc);
 
-    g_hwndOptionsDlg = CreateWindowExW(WS_EX_TOOLWINDOW, L"PalmweaverOptions", L"Options",
+    g_hwndOptionsDlg = CreateWindowExW(WS_EX_CAPTIONOKBTN, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        30, 25, 320, 200,
+        30, 25, 300, 145,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
