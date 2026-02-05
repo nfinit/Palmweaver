@@ -68,6 +68,9 @@ int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
 int g_nTabSize = 4;    /* Number of spaces per tab */
 int g_nColumnLimit = 80;  /* Column limit for reflow */
 
+/* Quick Note settings */
+int g_bQuickNoteStorage = 0;  /* Prefer storage card for quick notes */
+
 /* Font settings */
 static int g_fontSizes[] = {10, 12, 14, 16};
 static int g_fontSizeIdx = 2;  /* Default 14 */
@@ -1236,6 +1239,7 @@ static HWND g_hwndOptUseTabs = NULL;
 static HWND g_hwndOptUseSpaces = NULL;
 static HWND g_hwndOptTabSize = NULL;
 static HWND g_hwndOptColumnLimit = NULL;
+static HWND g_hwndOptQNStorage = NULL;
 
 #define IDC_OPT_USETABS   101
 #define IDC_OPT_USESPACES 102
@@ -1246,6 +1250,7 @@ static HWND g_hwndOptColumnLimit = NULL;
 #define IDC_OPT_THEMEDSEL 107
 #define IDC_OPT_HIDETASKBAR 108
 #define IDC_OPT_COLUMNLIMIT 109
+#define IDC_OPT_QNSTORAGE   110
 
 /* External: settings */
 void ClearSettings(void);
@@ -1321,6 +1326,10 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 68, 66, 30, 20, hwnd, (HMENU)IDC_OPT_COLUMNLIMIT, g_hInst, NULL);
             CreateWindowW(L"STATIC", L"columns",
                 WS_CHILD | WS_VISIBLE, 102, 68, 45, 16, hwnd, NULL, g_hInst, NULL);
+            g_hwndOptQNStorage = CreateWindowW(L"BUTTON", L"Quick notes to card",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                160, 66, 130, 20, hwnd, (HMENU)IDC_OPT_QNSTORAGE, g_hInst, NULL);
+            SendMessage(g_hwndOptQNStorage, BM_SETCHECK, g_bQuickNoteStorage, 0);
 
             /* Row 4: Fullscreen and theme options */
             hwndHideTaskbar = CreateWindowW(L"BUTTON", L"Hide taskbar in fullscreen",
@@ -1373,6 +1382,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
 
             g_bHideTaskbar = (int)SendMessage(hwndHideTaskbar, BM_GETCHECK, 0, 0);
+            g_bQuickNoteStorage = (int)SendMessage(g_hwndOptQNStorage, BM_GETCHECK, 0, 0);
 
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
@@ -1909,11 +1919,27 @@ static void DoQuickNote(void)
     char *pBuf;
     wchar_t *pWBuf;
     int len, i;
+    int useStorage = 0;
 
     if (!PromptSave()) return;
 
+    /* Check for storage card if preferred */
+    if (g_bQuickNoteStorage) {
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW(L"\\Storage Card*", &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            wsprintfW(notesDir, L"\\%s\\Notes", fd.cFileName);
+            FindClose(hFind);
+            useStorage = 1;
+        }
+    }
+
+    /* Fall back to My Documents\Notes */
+    if (!useStorage) {
+        lstrcpyW(notesDir, L"\\My Documents\\Notes");
+    }
+
     /* Ensure Notes directory exists */
-    lstrcpyW(notesDir, L"\\My Documents\\Notes");
     attr = GetFileAttributesW(notesDir);
     if (attr == 0xFFFFFFFF) {
         CreateDirectoryW(notesDir, NULL);
