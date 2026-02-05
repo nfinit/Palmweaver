@@ -22,6 +22,7 @@ extern int g_bHideTaskbar;
 extern int g_bUseTabs;
 extern int g_nTabSize;
 extern int g_nColumnLimit;
+extern int g_bShowColumnIndicator;
 extern int g_bQuickNoteStorage;
 extern int g_bQuickNoteAutoInit;
 extern wchar_t g_recentFiles[MAX_RECENT_FILES][MAX_PATH];
@@ -87,6 +88,10 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"ColumnLimit", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_nColumnLimit = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"ShowColumnIndicator", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bShowColumnIndicator = (int)val;
 
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"QuickNoteStorage", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
@@ -167,6 +172,9 @@ void SaveSettings(void)
 
     val = (DWORD)g_nColumnLimit;
     RegSetValueExW(hKey, L"ColumnLimit", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
+    val = (DWORD)g_bShowColumnIndicator;
+    RegSetValueExW(hKey, L"ShowColumnIndicator", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
     val = (DWORD)g_bQuickNoteStorage;
     RegSetValueExW(hKey, L"QuickNoteStorage", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));

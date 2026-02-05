@@ -68,6 +68,7 @@ static COLORREF g_origHighlightText;
 int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
 int g_nTabSize = 4;    /* Number of spaces per tab */
 int g_nColumnLimit = 80;  /* Column limit for reflow */
+int g_bShowColumnIndicator = 0;  /* Show visual column indicator (off by default) */
 
 /* Quick Note settings */
 int g_bQuickNoteStorage = 0;     /* Prefer storage card for quick notes */
@@ -241,6 +242,50 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
 }
 
 /*
+ * InvalidateColumnIndicator - Invalidate just the column indicator strip
+ * If line >= 0, only invalidate that line's segment; otherwise invalidate all
+ */
+static void InvalidateColumnIndicatorLine(int line)
+{
+    if (g_bShowColumnIndicator && g_hFont && g_hwndEdit) {
+        HDC hdc = GetDC(g_hwndEdit);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, g_hFont);
+        TEXTMETRICW tm;
+        GetTextMetricsW(hdc, &tm);
+        if (tm.tmAveCharWidth > 0 && tm.tmHeight > 0) {
+            SCROLLINFO si;
+            int scrollX = 0;
+            int x;
+            RECT rc;
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_POS;
+            if (GetScrollInfo(g_hwndEdit, SB_HORZ, &si)) {
+                scrollX = si.nPos;
+            }
+            x = (tm.tmAveCharWidth * g_nColumnLimit) - scrollX;
+            GetClientRect(g_hwndEdit, &rc);
+            if (x >= 0 && x < rc.right) {
+                rc.left = x;
+                rc.right = x + 1;
+                if (line >= 0) {
+                    int firstLineY = HIWORD(SendMessage(g_hwndEdit, EM_POSFROMCHAR, 0, 0));
+                    rc.top = firstLineY + (line * tm.tmHeight);
+                    rc.bottom = rc.top + tm.tmHeight;
+                }
+                InvalidateRect(g_hwndEdit, &rc, FALSE);
+            }
+        }
+        SelectObject(hdc, hOldFont);
+        ReleaseDC(g_hwndEdit, hdc);
+    }
+}
+
+static void InvalidateColumnIndicator(void)
+{
+    InvalidateColumnIndicatorLine(-1);
+}
+
+/*
  * EditSubclassProc - Catch cursor movement for status updates
  */
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -372,6 +417,50 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         FillRect((HDC)wParam, &rc, g_hBrushBg);
         return 1;
     }
+    
+    /* Draw column indicator after edit control paints */
+    if (msg == WM_PAINT && g_bShowColumnIndicator) {
+        LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+        if (g_hFont) {
+            HDC hdc = GetDC(hwnd);
+            HFONT hOldFont = (HFONT)SelectObject(hdc, g_hFont);
+            TEXTMETRICW tm;
+            GetTextMetricsW(hdc, &tm);
+            if (tm.tmAveCharWidth > 0) {
+                SCROLLINFO si;
+                int scrollX = 0;
+                int x, lineCount, textHeight, firstVis, firstChar, topY, visLines, maxVis;
+                RECT rc;
+                si.cbSize = sizeof(si);
+                si.fMask = SIF_POS;
+                if (GetScrollInfo(hwnd, SB_HORZ, &si)) {
+                    scrollX = si.nPos;
+                }
+                x = (tm.tmAveCharWidth * g_nColumnLimit) - scrollX;
+                GetClientRect(hwnd, &rc);
+                if (x >= 0 && x < rc.right) {
+                    HBRUSH hBrush = CreateSolidBrush(RGB(128, 128, 128));
+                    firstVis = (int)SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0);
+                    firstChar = (int)SendMessageW(hwnd, EM_LINEINDEX, firstVis, 0);
+                    topY = HIWORD(SendMessageW(hwnd, EM_POSFROMCHAR, firstChar, 0));
+                    lineCount = (int)SendMessageW(hwnd, EM_GETLINECOUNT, 0, 0);
+                    visLines = lineCount - firstVis;
+                    maxVis = (rc.bottom - topY) / tm.tmHeight;
+                    if (visLines > maxVis) visLines = maxVis;
+                    textHeight = topY + (visLines * tm.tmHeight);
+                    rc.left = x;
+                    rc.right = x + 1;
+                    rc.top = topY;
+                    if (textHeight < rc.bottom) rc.bottom = textHeight;
+                    FillRect(hdc, &rc, hBrush);
+                    DeleteObject(hBrush);
+                }
+            }
+            SelectObject(hdc, hOldFont);
+            ReleaseDC(hwnd, hdc);
+        }
+        return r;
+    }
 
     /* Apply theme selection colors when edit gains focus */
     if (msg == WM_SETFOCUS && g_bThemedSelection) {
@@ -449,10 +538,33 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         wParam == 'b' || wParam == 'B' || wParam == 'w' || wParam == 'W'))
         return 0;
 
+    /* Redraw column indicator after selection changes (EN_SELCHANGE not available on CE) */
+    if (g_bShowColumnIndicator) {
+        int redraw = 0;
+        if (msg == WM_LBUTTONUP || msg == WM_LBUTTONDOWN) redraw = 1;
+        if (msg == WM_KEYUP && wParam == VK_CONTROL) redraw = 1;  /* Ctrl+A etc */
+        if (msg == WM_KEYDOWN && GetKeyState(VK_SHIFT) < 0 &&
+            (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN ||
+             wParam == VK_HOME || wParam == VK_END)) redraw = 1;  /* Shift+arrow */
+        if (redraw) {
+            LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+            InvalidateColumnIndicator();
+            return r;
+        }
+    }
+
     /* Sync line numbers on scroll */
     if (msg == WM_VSCROLL) {
         LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
         UpdateLineNumbers();
+        InvalidateColumnIndicator();
+        return r;
+    }
+    
+    /* Redraw on horizontal scroll */
+    if (msg == WM_HSCROLL && g_bShowColumnIndicator) {
+        LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+        InvalidateRect(hwnd, NULL, FALSE);
         return r;
     }
 
@@ -461,7 +573,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         UpdateStatus();
         if (msg != WM_CHAR) UpdateLineNumbers();
     }
-
+    
     return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
 }
 
@@ -1473,6 +1585,7 @@ static HWND g_hwndOptUseSpaces = NULL;
 static HWND g_hwndOptTabSize = NULL;
 static HWND g_hwndOptColumnLimit = NULL;
 static HWND g_hwndOptFixedFont = NULL;
+static HWND g_hwndOptShowColInd = NULL;
 /* Options dialog control IDs */
 #define IDC_OPT_TAB       100
 #define IDC_OPT_USETABS   101
@@ -1486,6 +1599,7 @@ static HWND g_hwndOptFixedFont = NULL;
 #define IDC_OPT_COLUMNLIMIT 109
 #define IDC_OPT_QNSTORAGE   110
 #define IDC_OPT_QNAUTOINIT  111
+#define IDC_OPT_SHOWCOLIND  112
 
 /* External: settings */
 void ClearSettings(void);
@@ -1581,8 +1695,13 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 x + 55, y + 24, 30, 20, g_hwndOptTab, (HMENU)IDC_OPT_COLUMNLIMIT, g_hInst, NULL);
             g_hwndOptColumnLimit = g_optEditorCtrls[5];
             g_optEditorCtrls[6] = CreateWindowW(L"STATIC", L"columns",
-                WS_CHILD, x + 88, y + 26, 45, 16, g_hwndOptTab, NULL, g_hInst, NULL);
-            g_optEditorCtrls[7] = CreateWindowW(L"BUTTON", L"Clear Settings and Registry...",
+                WS_CHILD, x + 88, y + 26, 50, 16, g_hwndOptTab, NULL, g_hInst, NULL);
+            g_optEditorCtrls[7] = CreateWindowW(L"BUTTON", L"Show indicator",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x + 140, y + 24, 105, 20, g_hwndOptTab, (HMENU)IDC_OPT_SHOWCOLIND, g_hInst, NULL);
+            g_hwndOptShowColInd = g_optEditorCtrls[7];
+            if (g_bShowColumnIndicator) SendMessage(g_hwndOptShowColInd, BM_SETCHECK, 1, 0);
+            g_optEditorCtrls[8] = CreateWindowW(L"BUTTON", L"Clear Settings and Registry...",
                 WS_CHILD | BS_PUSHBUTTON,
                 x, y + 50, 175, 22, g_hwndOptTab, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
 
@@ -1652,6 +1771,9 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             size = 0;
             { int i; for (i = 0; buf[i]; i++) size = size * 10 + (buf[i] - '0'); }
             if (size >= 20 && size <= 200) g_nColumnLimit = size;
+            
+            g_bShowColumnIndicator = (int)SendMessage(g_hwndOptShowColInd, BM_GETCHECK, 0, 0);
+            InvalidateColumnIndicator();
 
             newSizeIdx = (int)SendMessageW(g_optDisplayCtrls[1], CB_GETCURSEL, 0, 0);
             newFixed = (int)SendMessage(g_hwndOptFixedFont, BM_GETCHECK, 0, 0);
@@ -1798,6 +1920,8 @@ static void UpdateLineNumbers(void)
                 g_lineNumWidth = newWidth;
                 SendMessage(g_hwndMain, WM_SIZE, 0, 0);
                 UpdateWindow(g_hwndMain);
+                InvalidateColumnIndicator();
+                UpdateWindow(g_hwndEdit);
             }
         }
     }
@@ -2803,6 +2927,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 }
                 UpdateStatus();
                 UpdateLineNumbers();
+                /* Redraw column indicator */
+                InvalidateColumnIndicator();
             }
             return 0;
         }
