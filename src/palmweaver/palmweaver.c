@@ -720,6 +720,7 @@ static void DoFindNext(void)
 {
     int len, findLen, start, i, j;
     wchar_t *buf;
+    wchar_t msg[64];
     DWORD sel;
 
     if (!g_findText[0]) return;
@@ -744,6 +745,8 @@ static void DoFindNext(void)
         if (j == findLen) {
             SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
             SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+            wsprintfW(msg, L"Found at position %d", i);
+            SetStatusMessage(msg);
             LocalFree(buf);
             return;
         }
@@ -755,12 +758,14 @@ static void DoFindNext(void)
         if (j == findLen) {
             SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
             SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+            wsprintfW(msg, L"Found at position %d (wrapped)", i);
+            SetStatusMessage(msg);
             LocalFree(buf);
             return;
         }
     }
     LocalFree(buf);
-    MessageBoxW(g_hwndMain, L"Text not found.", L"Find", MB_OK);
+    SetStatusMessage(L"Text not found");
 }
 
 static LRESULT CALLBACK FindEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1029,6 +1034,7 @@ static LRESULT CALLBACK ReplaceWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 MessageBoxW(hwnd, buf, L"Replace All", MB_OK);
             }
         }
+        SetForegroundWindow(hwnd);
         return 0;
 
     case WM_CLOSE:
