@@ -79,6 +79,7 @@ static int g_bMousePresent = 1;
 #define LINENUM_DIRTY_TEXT       0x01
 #define LINENUM_DIRTY_SCROLL     0x02
 #define LINENUM_DIRTY_LAYOUT     0x04
+#define PWM_EDIT_POSTJUMP_REPAINT (WM_APP + 0x45)
 #define EDIT_TEXT_LIMIT          0x7FFFFFFE
 #define STATUS_TOTALS_INTERVAL_MS 350
 #define BUSY_TEXT_THRESHOLD      65535
@@ -123,6 +124,8 @@ int g_recentCount = 0;
 static WNDPROC g_pfnEditProc = NULL;
 static WNDPROC g_pfnLineNumProc = NULL;
 static int g_bReplaceTypingGroupOpen = 0;
+static int g_bVScrollThumbTrackActive = 0;
+static int g_bPostJumpRepaintPending = 0;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -158,6 +161,7 @@ static void CloseReplaceTypingGroup(void);
 static void UpdateTheme(void);
 static void ApplySelectionColors(void);
 static void RestoreSelectionColors(void);
+static void QueueEditRepaintAfterJump(void);
 static void DoFileNew(void);
 static int DoFileOpen(void);
 static int DoFileSave(void);
@@ -166,7 +170,7 @@ static int PromptSave(void);
 static void DoGotoLine(void);
 static void DoFind(void);
 static void DoFindNext(void);
-static void RefreshEditAfterFindJump(void);
+static void RefreshEditAfterLargeJump(void);
 static void DoReplace(void);
 static void DoInsertDateTime(int mode);
 static void DoInsertRule(void);
@@ -567,6 +571,12 @@ static void InvalidateColumnIndicator(void)
  */
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (msg == PWM_EDIT_POSTJUMP_REPAINT) {
+        g_bPostJumpRepaintPending = 0;
+        RefreshEditAfterLargeJump();
+        return 0;
+    }
+
     /* Keep replacement-typing groups open only while user continues text input. */
     if (g_bReplaceTypingGroupOpen) {
         int ctrl = GetKeyState(VK_CONTROL) < 0;
@@ -801,8 +811,32 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     /* Sync line numbers on scroll */
     if (msg == WM_VSCROLL) {
+        UINT scrollCode = (UINT)LOWORD(wParam);
+        int refreshNow = 0;
+        int skipLineNumRefresh = 0;
         LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
-        RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
+
+        if (scrollCode == SB_THUMBTRACK) {
+            g_bVScrollThumbTrackActive = 1;
+            skipLineNumRefresh = 1;
+        } else if (scrollCode == SB_THUMBPOSITION || scrollCode == SB_TOP || scrollCode == SB_BOTTOM) {
+            refreshNow = 1;
+            g_bVScrollThumbTrackActive = 0;
+        } else if (scrollCode == SB_ENDSCROLL) {
+            if (g_bVScrollThumbTrackActive) refreshNow = 1;
+            g_bVScrollThumbTrackActive = 0;
+        }
+
+        if (refreshNow) QueueEditRepaintAfterJump();
+
+        if (skipLineNumRefresh) {
+            /* Avoid extra gutter churn during thumb tracking; refresh once at settle. */
+        } else if (refreshNow) {
+            RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 1);
+        } else {
+            RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
+        }
+
         if (g_bShowColumnIndicator) InvalidateColumnIndicator();
         return r;
     }
@@ -825,6 +859,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     }
 
     if (msg == WM_KILLFOCUS) {
+        g_bVScrollThumbTrackActive = 0;
         CloseReplaceTypingGroup();
     }
     
@@ -1244,11 +1279,18 @@ static int CharsMatch(wchar_t c1, wchar_t c2)
     return c1 == c2;
 }
 
-static void RefreshEditAfterFindJump(void)
+static void RefreshEditAfterLargeJump(void)
 {
     /* Force a full repaint after large jumps to avoid stale scroll artifacts on CE edit controls. */
-    InvalidateRect(g_hwndEdit, NULL, FALSE);
+    InvalidateRect(g_hwndEdit, NULL, TRUE);
     UpdateWindow(g_hwndEdit);
+}
+
+static void QueueEditRepaintAfterJump(void)
+{
+    if (!g_hwndEdit || g_bPostJumpRepaintPending) return;
+    g_bPostJumpRepaintPending = 1;
+    PostMessage(g_hwndEdit, PWM_EDIT_POSTJUMP_REPAINT, 0, 0);
 }
 
 static void DoFindNext(void)
@@ -1297,7 +1339,7 @@ static void DoFindNext(void)
             if (canSelectRange) {
                 SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
                 SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-                RefreshEditAfterFindJump();
+                RefreshEditAfterLargeJump();
                 line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
                 col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
                 wsprintfW(msg, L"Found at Ln %d, Col %d", line, col);
@@ -1328,7 +1370,7 @@ static void DoFindNext(void)
             if (canSelectRange) {
                 SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
                 SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-                RefreshEditAfterFindJump();
+                RefreshEditAfterLargeJump();
                 line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
                 col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
                 wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped)", line, col);
@@ -3498,6 +3540,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         CloseReplaceTypingGroup();
+        g_bVScrollThumbTrackActive = 0;
+        g_bPostJumpRepaintPending = 0;
         while (g_busyDepth > 0) EndBusyCursor(L"destroy");
         if (g_lineNumTimerActive) {
             KillTimer(hwnd, LINENUM_TIMER_ID);
