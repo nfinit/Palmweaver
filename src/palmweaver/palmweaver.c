@@ -35,6 +35,14 @@
 #define SM_MOUSEPRESENT 19  /* GetSystemMetrics index for mouse presence */
 #endif
 
+#ifndef SM_CXVSCROLL
+#define SM_CXVSCROLL 2  /* Vertical scrollbar width metric */
+#endif
+
+#ifndef SM_CYHSCROLL
+#define SM_CYHSCROLL 3  /* Horizontal scrollbar height metric */
+#endif
+
 #ifndef IDI_PALMWEAVER
 #define IDI_PALMWEAVER 1  /* Resource ID fallback if resource.h not included */
 #endif
@@ -46,6 +54,9 @@ HWND g_hwndCB;
 HWND g_hwndEdit;
 HWND g_hwndStatus;
 HWND g_hwndLineNum;
+HWND g_hwndPagedVScroll;
+HWND g_hwndPagedCorner;
+HWND g_hwndPagedSeam;
 HFONT g_hFont;
 HBRUSH g_hBrushBg;
 static HBRUSH g_hBrushColInd = NULL;  /* Cached column indicator brush */
@@ -86,6 +97,8 @@ static int g_bMousePresent = 1;
 #define PAGED_MODE_THRESHOLD_CHARS 60000
 #define PAGED_WINDOW_CHARS        49152
 #define PAGED_EDGE_CHARS          4096
+#define PAGED_VSCROLL_EXTRA_W      0
+#define PAGED_VSCROLL_SEAM_OVERLAP 2
 
 /* Theme colors: {foreground, background} */
 static COLORREF g_themes[][2] = {
@@ -138,6 +151,7 @@ static int g_pagedPageStart = 0;
 static int g_pagedPageLen = 0;
 static int *g_pagedLineStarts = NULL;
 static int g_pagedLineCount = 1;
+static int g_bMainDestroying = 0;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -173,6 +187,8 @@ static void CloseReplaceTypingGroup(void);
 static void UpdateTheme(void);
 static void ApplySelectionColors(void);
 static void RestoreSelectionColors(void);
+static void InvalidateColumnIndicator(void);
+static void SetEditVerticalScrollbarVisible(int visible);
 static void QueueEditRepaintAfterJump(void);
 static void PagedReset(void);
 static int PagedRebuildLineStarts(void);
@@ -185,6 +201,7 @@ static int PagedGetGlobalLineFromLocalChar(int localChar);
 static int PagedGetVisibleRows(void);
 static void PagedSyncVScroll(void);
 static int PagedHandleThumbScroll(UINT scrollCode);
+static int PagedProcessScrollCode(UINT scrollCode);
 static void PagedMaybeShiftWindowByCaret(void);
 static void PagedHandleVScrollEdge(UINT scrollCode);
 static void DoFileNew(void);
@@ -251,6 +268,8 @@ static void EndBusyCursor(const wchar_t *tag)
 
 static void PagedReset(void)
 {
+    int wasPaged = g_bPagedMode;
+
     if (g_pagedText) {
         LocalFree(g_pagedText);
         g_pagedText = NULL;
@@ -266,6 +285,10 @@ static void PagedReset(void)
     g_pagedPageStart = 0;
     g_pagedPageLen = 0;
     g_pagedLineCount = 1;
+
+    if (wasPaged && g_hwndMain && g_hwndEdit && g_hwndStatus && !g_bMainDestroying) {
+        SendMessageW(g_hwndMain, WM_SIZE, 0, 0);
+    }
 }
 
 static int PagedRebuildLineStarts(void)
@@ -418,6 +441,10 @@ static int PagedEnableWithText(wchar_t *text, int len)
         return 0;
     }
 
+    if (g_hwndMain && g_hwndEdit && g_hwndStatus) {
+        SendMessageW(g_hwndMain, WM_SIZE, 0, 0);
+    }
+
     SetStatusMessage(L"Large file mode active");
     return 1;
 }
@@ -521,6 +548,7 @@ static int PagedGetVisibleRows(void)
 static void PagedSyncVScroll(void)
 {
     SCROLLINFO si;
+    HWND hwndScroll;
     int firstVisible, localChar;
     int globalTopLine;
     int visibleRows;
@@ -539,12 +567,15 @@ static void PagedSyncVScroll(void)
     si.nMax = (g_pagedLineCount > 0) ? (g_pagedLineCount - 1) : 0;
     si.nPage = (UINT)visibleRows;
     si.nPos = globalTopLine;
-    SetScrollInfo(g_hwndEdit, SB_VERT, &si, TRUE);
+    hwndScroll = g_hwndPagedVScroll ? g_hwndPagedVScroll : g_hwndEdit;
+    if (hwndScroll == g_hwndEdit) SetScrollInfo(hwndScroll, SB_VERT, &si, TRUE);
+    else SetScrollInfo(hwndScroll, SB_CTL, &si, TRUE);
 }
 
 static int PagedHandleThumbScroll(UINT scrollCode)
 {
     SCROLLINFO si;
+    HWND hwndScroll;
     int targetLine;
     int targetIdx;
 
@@ -560,7 +591,12 @@ static int PagedHandleThumbScroll(UINT scrollCode)
     else {
         si.cbSize = sizeof(si);
         si.fMask = SIF_TRACKPOS | SIF_POS;
-        if (!GetScrollInfo(g_hwndEdit, SB_VERT, &si)) return 1;
+        hwndScroll = g_hwndPagedVScroll ? g_hwndPagedVScroll : g_hwndEdit;
+        if (hwndScroll == g_hwndEdit) {
+            if (!GetScrollInfo(hwndScroll, SB_VERT, &si)) return 1;
+        } else {
+            if (!GetScrollInfo(hwndScroll, SB_CTL, &si)) return 1;
+        }
         targetLine = si.nTrackPos;
     }
 
@@ -582,6 +618,54 @@ static int PagedHandleThumbScroll(UINT scrollCode)
         RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 1);
     }
 
+    return 1;
+}
+
+static int PagedProcessScrollCode(UINT scrollCode)
+{
+    int handled = 1;
+
+    if (!g_bPagedMode) return 0;
+
+    switch (scrollCode) {
+    case SB_LINEUP:
+        SendMessageW(g_hwndEdit, EM_LINESCROLL, 0, -1);
+        break;
+    case SB_LINEDOWN:
+        SendMessageW(g_hwndEdit, EM_LINESCROLL, 0, 1);
+        break;
+    case SB_PAGEUP:
+        SendMessageW(g_hwndEdit, EM_LINESCROLL, 0, -(PagedGetVisibleRows() - 1));
+        break;
+    case SB_PAGEDOWN:
+        SendMessageW(g_hwndEdit, EM_LINESCROLL, 0, PagedGetVisibleRows() - 1);
+        break;
+    case SB_TOP:
+    case SB_BOTTOM:
+    case SB_THUMBTRACK:
+    case SB_THUMBPOSITION:
+        PagedHandleThumbScroll(scrollCode);
+        break;
+    case SB_ENDSCROLL:
+        break;
+    default:
+        handled = 0;
+        break;
+    }
+
+    if (!handled) return 0;
+
+    if (scrollCode != SB_THUMBTRACK) {
+        RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 1);
+        if (scrollCode == SB_LINEUP || scrollCode == SB_LINEDOWN ||
+            scrollCode == SB_PAGEUP || scrollCode == SB_PAGEDOWN ||
+            scrollCode == SB_ENDSCROLL) {
+            PagedHandleVScrollEdge(scrollCode);
+        }
+        PagedSyncVScroll();
+    }
+
+    if (g_bShowColumnIndicator) InvalidateColumnIndicator();
     return 1;
 }
 
@@ -974,6 +1058,23 @@ static void InvalidateColumnIndicator(void)
     }
 }
 
+static void SetEditVerticalScrollbarVisible(int visible)
+{
+    LONG style, newStyle;
+
+    if (!g_hwndEdit) return;
+
+    style = GetWindowLong(g_hwndEdit, GWL_STYLE);
+    if (visible) newStyle = style | WS_VSCROLL;
+    else newStyle = style & ~WS_VSCROLL;
+
+    if (newStyle != style) {
+        SetWindowLong(g_hwndEdit, GWL_STYLE, newStyle);
+        SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+}
+
 /*
  * EditSubclassProc - Catch cursor movement for status updates
  */
@@ -1224,51 +1325,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         int skipLineNumRefresh = 0;
         LRESULT r;
 
-        if (g_bPagedMode) {
-            int handled = 1;
-
-            switch (scrollCode) {
-            case SB_LINEUP:
-                SendMessageW(hwnd, EM_LINESCROLL, 0, -1);
-                break;
-            case SB_LINEDOWN:
-                SendMessageW(hwnd, EM_LINESCROLL, 0, 1);
-                break;
-            case SB_PAGEUP:
-                SendMessageW(hwnd, EM_LINESCROLL, 0, -(PagedGetVisibleRows() - 1));
-                break;
-            case SB_PAGEDOWN:
-                SendMessageW(hwnd, EM_LINESCROLL, 0, PagedGetVisibleRows() - 1);
-                break;
-            case SB_TOP:
-            case SB_BOTTOM:
-            case SB_THUMBTRACK:
-            case SB_THUMBPOSITION:
-                PagedHandleThumbScroll(scrollCode);
-                break;
-            case SB_ENDSCROLL:
-                break;
-            default:
-                handled = 0;
-                break;
-            }
-
-            if (handled) {
-                if (scrollCode == SB_THUMBTRACK) {
-                    /* Let thumb drag stay fluid; commit actual jump on THUMBPOSITION. */
-                } else {
-                    RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 1);
-                    if (scrollCode == SB_LINEUP || scrollCode == SB_LINEDOWN ||
-                        scrollCode == SB_PAGEUP || scrollCode == SB_PAGEDOWN ||
-                        scrollCode == SB_ENDSCROLL) {
-                        PagedHandleVScrollEdge(scrollCode);
-                    }
-                    PagedSyncVScroll();
-                }
-                if (g_bShowColumnIndicator) InvalidateColumnIndicator();
-                return 0;
-            }
-        }
+        if (g_bPagedMode && PagedProcessScrollCode(scrollCode)) return 0;
 
         r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
 
@@ -1514,7 +1571,13 @@ static void CreateMenuBar(HWND hwndCB)
  */
 static void OnSize(HWND hwnd, int cx, int cy)
 {
-    int cbHeight, sbHeight, editLeft, editHeight;
+    int cbHeight, sbHeight, editLeft, editHeight, editWidth;
+    int reservePagedScroll = 0;
+    int showPagedScroll = 0;
+    int showPagedCorner = 0;
+    int vscrollWidth = 0;
+    int vscrollHeight = 0;
+    int hscrollHeight = 0;
     RECT rcClient, rcStatus;
 
     if (!g_hwndCB || !g_hwndEdit || !g_hwndStatus) {
@@ -1548,11 +1611,75 @@ static void OnSize(HWND hwnd, int cx, int cy)
 
     editHeight = cy - cbHeight - sbHeight;
     editLeft = g_bShowLineNums ? g_lineNumWidth : 0;
+    editWidth = cx - editLeft;
 
     if (g_hwndLineNum)
         MoveWindow(g_hwndLineNum, 0, cbHeight, g_lineNumWidth, editHeight, TRUE);
+    if (g_bPagedMode && g_hwndPagedVScroll) {
+        showPagedScroll = g_bShowScrollbars ? 1 : 0;
+        reservePagedScroll = showPagedScroll;
+        vscrollWidth = GetSystemMetrics(SM_CXVSCROLL);
+        if (vscrollWidth <= 0) vscrollWidth = 16;
+        vscrollWidth += PAGED_VSCROLL_EXTRA_W;
+        if (showPagedScroll && !g_bWordWrap) {
+            hscrollHeight = GetSystemMetrics(SM_CYHSCROLL);
+            if (hscrollHeight <= 0) hscrollHeight = 16;
+            showPagedCorner = 1;
+        }
+        if (editWidth > vscrollWidth) editWidth -= vscrollWidth;
+    }
+    vscrollHeight = editHeight - hscrollHeight;
+    if (vscrollHeight < 0) vscrollHeight = 0;
 
-    MoveWindow(g_hwndEdit, editLeft, cbHeight, cx - editLeft, editHeight, TRUE);
+    MoveWindow(g_hwndEdit, editLeft, cbHeight, editWidth, editHeight, TRUE);
+
+    if (g_bPagedMode) SetEditVerticalScrollbarVisible(0);
+    else SetEditVerticalScrollbarVisible(g_bShowScrollbars ? 1 : 0);
+
+    if (g_hwndPagedVScroll) {
+        if (reservePagedScroll) {
+            MoveWindow(g_hwndPagedVScroll,
+                editLeft + editWidth - PAGED_VSCROLL_SEAM_OVERLAP,
+                cbHeight,
+                vscrollWidth + PAGED_VSCROLL_SEAM_OVERLAP,
+                vscrollHeight, TRUE);
+            ShowWindow(g_hwndPagedVScroll, showPagedScroll ? SW_SHOW : SW_HIDE);
+        } else {
+            ShowWindow(g_hwndPagedVScroll, SW_HIDE);
+        }
+    }
+
+    if (g_hwndPagedCorner) {
+        if (reservePagedScroll && showPagedCorner) {
+            MoveWindow(g_hwndPagedCorner,
+                editLeft + editWidth - PAGED_VSCROLL_SEAM_OVERLAP,
+                cbHeight + editHeight - hscrollHeight,
+                vscrollWidth + PAGED_VSCROLL_SEAM_OVERLAP,
+                hscrollHeight, TRUE);
+            ShowWindow(g_hwndPagedCorner, SW_SHOW);
+        } else {
+            ShowWindow(g_hwndPagedCorner, SW_HIDE);
+        }
+    }
+
+    if (g_hwndPagedSeam) {
+        if (reservePagedScroll) {
+            int seamTop = cbHeight + 1;
+            int seamX = editLeft + editWidth - 1;
+            int seamWidth = 1;  /* Divider only */
+            int seamHeight = vscrollHeight - 2;
+            if (seamHeight < 0) seamHeight = 0;
+            SetWindowPos(g_hwndPagedSeam, HWND_TOP,
+                seamX,
+                seamTop,
+                seamWidth,
+                seamHeight,
+                SWP_SHOWWINDOW);
+        } else {
+            ShowWindow(g_hwndPagedSeam, SW_HIDE);
+        }
+    }
+
     if (g_bPagedMode) PagedSyncVScroll();
 }
 
@@ -3836,6 +3963,30 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
                 (LONG)EditSubclassProc);
 
+            /* Dedicated vertical scrollbar for paged mode (hidden by default). */
+            g_hwndPagedVScroll = CreateWindowW(
+                L"SCROLLBAR", NULL,
+                WS_CHILD | SBS_VERT,
+                0, 0, 0, 0,
+                hwnd, (HMENU)1004, g_hInst, NULL);
+            if (g_hwndPagedVScroll) ShowWindow(g_hwndPagedVScroll, SW_HIDE);
+
+            /* Dead-corner filler for paged mode when both scrollbars are visible. */
+            g_hwndPagedCorner = CreateWindowW(
+                L"STATIC", NULL,
+                WS_CHILD | WS_BORDER,
+                0, 0, 0, 0,
+                hwnd, (HMENU)1005, g_hInst, NULL);
+            if (g_hwndPagedCorner) ShowWindow(g_hwndPagedCorner, SW_HIDE);
+
+            /* 1px seam mask to hide the internal edit/divider artifact in paged mode. */
+            g_hwndPagedSeam = CreateWindowW(
+                L"STATIC", NULL,
+                WS_CHILD,
+                0, 0, 0, 0,
+                hwnd, (HMENU)1006, g_hInst, NULL);
+            if (g_hwndPagedSeam) ShowWindow(g_hwndPagedSeam, SW_HIDE);
+
             /* Initialize undo system */
             Undo_Init(g_hwndEdit);
 
@@ -3855,6 +4006,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetFocus(g_hwndEdit);
         }
         return 0;
+
+    case WM_VSCROLL:
+        if ((HWND)lParam == g_hwndPagedVScroll && g_bPagedMode) {
+            if (PagedProcessScrollCode((UINT)LOWORD(wParam))) return 0;
+        }
+        break;
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
@@ -4107,16 +4264,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 LONG style = GetWindowLong(g_hwndEdit, GWL_STYLE);
                 g_bShowScrollbars = !g_bShowScrollbars;
                 if (g_bShowScrollbars) {
-                    style |= WS_VSCROLL;
+                    if (!g_bPagedMode) style |= WS_VSCROLL;
                     if (!g_bWordWrap) style |= WS_HSCROLL;
                 } else {
                     style &= ~(WS_VSCROLL | WS_HSCROLL);
                 }
+                if (g_bPagedMode) style &= ~WS_VSCROLL;
                 SetWindowLong(g_hwndEdit, GWL_STYLE, style);
                 SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                if (g_bPagedMode) SetEditVerticalScrollbarVisible(0);
                 CheckMenuItem(g_hViewMenu, IDM_VIEW_SCROLLBARS,
                     g_bShowScrollbars ? MF_CHECKED : MF_UNCHECKED);
+                SendMessage(hwnd, WM_SIZE, 0, 0);
             }
             return 0;
 
@@ -4223,9 +4383,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetBkColor((HDC)wParam, bg);
             return (LRESULT)g_hBrushBg;
         }
+        if ((HWND)lParam == g_hwndPagedSeam) {
+            COLORREF bg = g_bInverseColors ? g_themes[g_nTheme][0] : g_themes[g_nTheme][1];
+            SetBkColor((HDC)wParam, bg);
+            return (LRESULT)g_hBrushBg;
+        }
+        if ((HWND)lParam == g_hwndPagedCorner) {
+            COLORREF bg = GetSysColor(COLOR_BTNFACE);
+            SetBkColor((HDC)wParam, bg);
+            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        }
         break;
 
     case WM_DESTROY:
+        g_bMainDestroying = 1;
         CloseReplaceTypingGroup();
         PagedReset();
         g_bVScrollThumbTrackActive = 0;
