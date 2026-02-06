@@ -20,6 +20,7 @@ typedef struct {
     int type;           /* UNDO_INSERT or UNDO_DELETE */
     int pos;            /* Character position */
     int len;            /* Text length */
+    int group;          /* 0 = standalone, non-zero = grouped with adjacent ops */
     wchar_t *text;      /* Allocated text buffer */
 } UndoEntry;
 
@@ -28,6 +29,12 @@ static HWND s_hwndEdit = NULL;
 static UndoEntry s_undoStack[UNDO_MAX_ENTRIES];
 static int s_undoCount = 0;      /* Number of entries in undo stack */
 static int s_redoCount = 0;      /* Number of entries available for redo */
+static int s_groupDepth = 0;
+static int s_groupId = 0;
+static int s_nextGroupId = 1;
+
+/* Forward declaration */
+static void DeleteRange(int start, int len);
 
 /*
  * Free a single entry's text buffer
@@ -39,6 +46,31 @@ static void FreeEntry(UndoEntry *e)
         e->text = NULL;
     }
     e->len = 0;
+    e->group = 0;
+}
+
+static void ApplyUndoEntry(UndoEntry *e)
+{
+    if (e->type == UNDO_INSERT) {
+        /* Was an insert - delete the text to undo */
+        DeleteRange(e->pos, e->len);
+    } else {
+        /* Was a delete - insert the text back to undo */
+        SendMessageW(s_hwndEdit, EM_SETSEL, e->pos, e->pos);
+        SendMessageW(s_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)e->text);
+    }
+}
+
+static void ApplyRedoEntry(UndoEntry *e)
+{
+    if (e->type == UNDO_INSERT) {
+        /* Was an insert - re-insert the text */
+        SendMessageW(s_hwndEdit, EM_SETSEL, e->pos, e->pos);
+        SendMessageW(s_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)e->text);
+    } else {
+        /* Was a delete - re-delete the text */
+        DeleteRange(e->pos, e->len);
+    }
 }
 
 /*
@@ -53,7 +85,11 @@ void Undo_Init(HWND hwndEdit)
     for (i = 0; i < UNDO_MAX_ENTRIES; i++) {
         s_undoStack[i].text = NULL;
         s_undoStack[i].len = 0;
+        s_undoStack[i].group = 0;
     }
+    s_groupDepth = 0;
+    s_groupId = 0;
+    s_nextGroupId = 1;
 }
 
 /*
@@ -81,6 +117,25 @@ void Undo_Clear(void)
     }
     s_undoCount = 0;
     s_redoCount = 0;
+    s_groupDepth = 0;
+    s_groupId = 0;
+    s_nextGroupId = 1;
+}
+
+void Undo_BeginGroup(void)
+{
+    if (s_groupDepth == 0) {
+        s_groupId = s_nextGroupId++;
+        if (s_nextGroupId <= 0) s_nextGroupId = 1;
+    }
+    s_groupDepth++;
+}
+
+void Undo_EndGroup(void)
+{
+    if (s_groupDepth <= 0) return;
+    s_groupDepth--;
+    if (s_groupDepth == 0) s_groupId = 0;
 }
 
 /*
@@ -91,11 +146,13 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
 {
     UndoEntry *e;
     int i;
+    int currentGroup;
 
     if (!text) return;
     if (len < 0) len = lstrlenW(text);
     if (len == 0) return;
     if (len > UNDO_MAX_TEXT) len = UNDO_MAX_TEXT;
+    currentGroup = (s_groupDepth > 0) ? s_groupId : 0;
 
     /* New edit clears redo stack */
     for (i = s_undoCount; i < s_undoCount + s_redoCount && i < UNDO_MAX_ENTRIES; i++) {
@@ -108,7 +165,8 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
         e = &s_undoStack[s_undoCount - 1];
         
         /* Coalesce consecutive inserts (typing) */
-        if (type == UNDO_INSERT && e->type == UNDO_INSERT && 
+        if (e->group == currentGroup &&
+            type == UNDO_INSERT && e->type == UNDO_INSERT &&
             pos == e->pos + e->len && e->len < UNDO_MAX_TEXT) {
             wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
             if (newText) {
@@ -123,7 +181,8 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
         }
         
         /* Coalesce consecutive backspaces (deleting backward) */
-        if (type == UNDO_DELETE && e->type == UNDO_DELETE &&
+        if (e->group == currentGroup &&
+            type == UNDO_DELETE && e->type == UNDO_DELETE &&
             pos == e->pos - 1 && e->len < UNDO_MAX_TEXT) {
             wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
             if (newText) {
@@ -139,7 +198,8 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
         }
         
         /* Coalesce consecutive deletes (Delete key at same position) */
-        if (type == UNDO_DELETE && e->type == UNDO_DELETE &&
+        if (e->group == currentGroup &&
+            type == UNDO_DELETE && e->type == UNDO_DELETE &&
             pos == e->pos && e->len < UNDO_MAX_TEXT) {
             wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
             if (newText) {
@@ -170,6 +230,7 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
     e->type = type;
     e->pos = pos;
     e->len = len;
+    e->group = currentGroup;
     e->text = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
     if (e->text) {
         int j;
@@ -213,23 +274,25 @@ static void DeleteRange(int start, int len)
 int Undo_Perform(void)
 {
     UndoEntry *e;
+    int group;
 
     if (s_undoCount == 0 || !s_hwndEdit) return 0;
 
     s_undoCount--;
     e = &s_undoStack[s_undoCount];
-
-    if (e->type == UNDO_INSERT) {
-        /* Was an insert - delete the text to undo */
-        DeleteRange(e->pos, e->len);
-    } else {
-        /* Was a delete - insert the text back to undo */
-        SendMessageW(s_hwndEdit, EM_SETSEL, e->pos, e->pos);
-        SendMessageW(s_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)e->text);
-    }
-
-    /* Move to redo stack (entry stays in place, just adjust counts) */
+    group = e->group;
+    ApplyUndoEntry(e);
     s_redoCount++;
+
+    /* Grouped operations undo together in one user step. */
+    if (group > 0) {
+        while (s_undoCount > 0 && s_undoStack[s_undoCount - 1].group == group) {
+            s_undoCount--;
+            e = &s_undoStack[s_undoCount];
+            ApplyUndoEntry(e);
+            s_redoCount++;
+        }
+    }
 
     return 1;
 }
@@ -241,22 +304,25 @@ int Undo_Perform(void)
 int Undo_Redo(void)
 {
     UndoEntry *e;
+    int group;
 
     if (s_redoCount == 0 || !s_hwndEdit) return 0;
 
     e = &s_undoStack[s_undoCount];
-
-    if (e->type == UNDO_INSERT) {
-        /* Was an insert - re-insert the text */
-        SendMessageW(s_hwndEdit, EM_SETSEL, e->pos, e->pos);
-        SendMessageW(s_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)e->text);
-    } else {
-        /* Was a delete - re-delete the text */
-        DeleteRange(e->pos, e->len);
-    }
-
+    group = e->group;
+    ApplyRedoEntry(e);
     s_undoCount++;
     s_redoCount--;
+
+    /* Grouped operations redo together in one user step. */
+    if (group > 0) {
+        while (s_redoCount > 0 && s_undoStack[s_undoCount].group == group) {
+            e = &s_undoStack[s_undoCount];
+            ApplyRedoEntry(e);
+            s_undoCount++;
+            s_redoCount--;
+        }
+    }
 
     return 1;
 }

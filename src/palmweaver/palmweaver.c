@@ -122,6 +122,7 @@ int g_recentCount = 0;
 /* Edit control subclass */
 static WNDPROC g_pfnEditProc = NULL;
 static WNDPROC g_pfnLineNumProc = NULL;
+static int g_bReplaceTypingGroupOpen = 0;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -149,6 +150,11 @@ static void ForceIdleCursor(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
 static void ClearStatusMessage(void);
+static int CaptureEditRangeTextFull(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen);
+static int CaptureEditRangeText(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen);
+static void RecordUndoDeleteRange(HWND hwnd, DWORD start, DWORD end);
+static int IsLikelyTypingKey(UINT vk, int ctrl, int alt);
+static void CloseReplaceTypingGroup(void);
 static void UpdateTheme(void);
 static void ApplySelectionColors(void);
 static void RestoreSelectionColors(void);
@@ -212,6 +218,220 @@ static void EndBusyCursor(const wchar_t *tag)
     (void)tag;
     g_busyDepth--;
     if (g_hwndStatus) UpdateStatus();
+}
+
+static int CaptureEditRangeTextFull(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen)
+{
+    int totalLen, span, i;
+    wchar_t *fullText;
+    wchar_t *slice;
+
+    if (!outText || !outLen || end <= start) return 0;
+    *outText = NULL;
+    *outLen = 0;
+
+    totalLen = GetWindowTextLengthW(hwnd);
+    if ((int)start < 0 || (int)end > totalLen || end <= start) return 0;
+
+    span = (int)(end - start);
+    fullText = (wchar_t *)LocalAlloc(LMEM_FIXED, (totalLen + 1) * sizeof(wchar_t));
+    if (!fullText) return 0;
+    GetWindowTextW(hwnd, fullText, totalLen + 1);
+
+    slice = (wchar_t *)LocalAlloc(LMEM_FIXED, (span + 1) * sizeof(wchar_t));
+    if (!slice) {
+        LocalFree(fullText);
+        return 0;
+    }
+
+    for (i = 0; i < span; i++) slice[i] = fullText[(int)start + i];
+    slice[span] = 0;
+    LocalFree(fullText);
+
+    *outText = slice;
+    *outLen = span;
+    return 1;
+}
+
+/*
+ * CaptureEditRangeText - Extract text range [start, end) from Edit control
+ * without snapshotting the full document buffer.
+ * Returns 1 on success with allocated output buffer (caller frees via LocalFree).
+ */
+static int CaptureEditRangeText(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen)
+{
+    int outCap, outPos = 0;
+    int startLine, endLine, totalLines, line;
+    wchar_t *out = NULL;
+    wchar_t *lineBuf = NULL;
+    int lineBufCap = 0;
+
+    if (!outText || !outLen || end <= start) return 0;
+    *outText = NULL;
+    *outLen = 0;
+
+    outCap = (int)(end - start);
+    if (outCap <= 0) return 0;
+
+    out = (wchar_t *)LocalAlloc(LMEM_FIXED, (outCap + 1) * sizeof(wchar_t));
+    if (!out) return 0;
+
+    startLine = (int)SendMessageW(hwnd, EM_LINEFROMCHAR, (WPARAM)start, 0);
+    endLine = (int)SendMessageW(hwnd, EM_LINEFROMCHAR, (WPARAM)(end - 1), 0);
+    totalLines = (int)SendMessageW(hwnd, EM_GETLINECOUNT, 0, 0);
+    if (startLine < 0) startLine = 0;
+    if (endLine < startLine) endLine = startLine;
+    if (totalLines <= 0) totalLines = endLine + 1;
+
+    for (line = startLine; line <= endLine && outPos < outCap; line++) {
+        int lineStart = (int)SendMessageW(hwnd, EM_LINEINDEX, line, 0);
+        int lineLen, lineEnd, nextLineStart;
+        int chunkStart, chunkEnd;
+
+        if (lineStart < 0) continue;
+
+        lineLen = (int)SendMessageW(hwnd, EM_LINELENGTH, lineStart, 0);
+        if (lineLen < 0) lineLen = 0;
+        lineEnd = lineStart + lineLen;
+        nextLineStart = lineEnd;
+        if (line + 1 < totalLines) {
+            int nextIdx = (int)SendMessageW(hwnd, EM_LINEINDEX, line + 1, 0);
+            if (nextIdx > nextLineStart) nextLineStart = nextIdx;
+        }
+
+        chunkStart = ((int)start > lineStart) ? (int)start : lineStart;
+        chunkEnd = ((int)end < lineEnd) ? (int)end : lineEnd;
+        if (chunkEnd > chunkStart && lineLen > 0) {
+            int needCap = lineLen + 1;
+            int copied;
+            int startOff = chunkStart - lineStart;
+            int want = chunkEnd - chunkStart;
+            int j;
+
+            if (needCap > 65530) {
+                LocalFree(out);
+                if (lineBuf) LocalFree(lineBuf);
+                return CaptureEditRangeTextFull(hwnd, start, end, outText, outLen);
+            }
+
+            if (needCap > lineBufCap) {
+                wchar_t *newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (needCap + 1) * sizeof(wchar_t));
+                if (!newBuf) {
+                    LocalFree(out);
+                    if (lineBuf) LocalFree(lineBuf);
+                    return 0;
+                }
+                if (lineBuf) LocalFree(lineBuf);
+                lineBuf = newBuf;
+                lineBufCap = needCap + 1;
+            }
+
+            *((WORD *)lineBuf) = (WORD)(lineBufCap - 1);
+            copied = (int)SendMessageW(hwnd, EM_GETLINE, line, (LPARAM)lineBuf);
+            if (copied < 0) copied = 0;
+            if (copied > lineBufCap - 1) copied = lineBufCap - 1;
+            lineBuf[copied] = 0;
+
+            if (copied < lineLen && chunkEnd > lineStart + copied) {
+                LocalFree(out);
+                if (lineBuf) LocalFree(lineBuf);
+                return CaptureEditRangeTextFull(hwnd, start, end, outText, outLen);
+            }
+
+            if (startOff < copied) {
+                int avail = copied - startOff;
+                if (want > avail) want = avail;
+                for (j = 0; j < want && outPos < outCap; j++) {
+                    out[outPos++] = lineBuf[startOff + j];
+                }
+            }
+        }
+
+        if (nextLineStart > lineEnd) {
+            int breakLen = nextLineStart - lineEnd;
+            int bStart = ((int)start > lineEnd) ? (int)start : lineEnd;
+            int bEnd = ((int)end < nextLineStart) ? (int)end : nextLineStart;
+            static const wchar_t kBreakChars[2] = {L'\r', L'\n'};
+
+            if (breakLen > 2) {
+                LocalFree(out);
+                if (lineBuf) LocalFree(lineBuf);
+                return CaptureEditRangeTextFull(hwnd, start, end, outText, outLen);
+            }
+            if (bEnd > bStart && breakLen > 0) {
+                int offset = bStart - lineEnd;
+                int count = bEnd - bStart;
+                int j;
+
+                if (offset < 0) offset = 0;
+                if (offset > breakLen) offset = breakLen;
+                if (count > breakLen - offset) count = breakLen - offset;
+                for (j = 0; j < count && outPos < outCap; j++) {
+                    out[outPos++] = kBreakChars[offset + j];
+                }
+            }
+        }
+    }
+
+    if (lineBuf) LocalFree(lineBuf);
+    out[outPos] = 0;
+    if (outPos <= 0) {
+        LocalFree(out);
+        return 0;
+    }
+
+    *outText = out;
+    *outLen = outPos;
+    return 1;
+}
+
+static void RecordUndoDeleteRange(HWND hwnd, DWORD start, DWORD end)
+{
+    wchar_t *deletedText = NULL;
+    int deletedLen = 0;
+
+    if (end <= start) return;
+    if (CaptureEditRangeText(hwnd, start, end, &deletedText, &deletedLen)) {
+        Undo_RecordDelete((int)start, deletedText, deletedLen);
+        LocalFree(deletedText);
+    }
+}
+
+static int IsLikelyTypingKey(UINT vk, int ctrl, int alt)
+{
+    if (ctrl || alt) return 0;
+
+    switch (vk) {
+    case VK_LEFT:
+    case VK_RIGHT:
+    case VK_UP:
+    case VK_DOWN:
+    case VK_HOME:
+    case VK_END:
+    case VK_PRIOR:
+    case VK_NEXT:
+    case VK_INSERT:
+    case VK_DELETE:
+    case VK_BACK:
+    case VK_ESCAPE:
+        return 0;
+    default:
+        break;
+    }
+
+    if (vk >= VK_F1 && vk <= VK_F24) return 0;
+    if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) return 0;
+    if (vk == VK_CAPITAL || vk == VK_NUMLOCK || vk == VK_SCROLL) return 0;
+
+    return 1;
+}
+
+static void CloseReplaceTypingGroup(void)
+{
+    if (g_bReplaceTypingGroupOpen) {
+        Undo_EndGroup();
+        g_bReplaceTypingGroupOpen = 0;
+    }
 }
 
 /*
@@ -347,6 +567,26 @@ static void InvalidateColumnIndicator(void)
  */
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    /* Keep replacement-typing groups open only while user continues text input. */
+    if (g_bReplaceTypingGroupOpen) {
+        int ctrl = GetKeyState(VK_CONTROL) < 0;
+        int alt = GetKeyState(VK_MENU) < 0;
+        int keepOpen = 1;
+
+        if (msg == WM_CHAR) {
+            keepOpen = (wParam >= 32 || wParam == '\r' || wParam == '\t');
+        } else if (msg == WM_KEYDOWN) {
+            keepOpen = IsLikelyTypingKey((UINT)wParam, ctrl, alt);
+        } else if (msg == WM_KEYUP) {
+            keepOpen = 1;
+        } else if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN) {
+            /* Pointer interaction should terminate the replacement typing run. */
+            keepOpen = 0;
+        }
+
+        if (!keepOpen) CloseReplaceTypingGroup();
+    }
+
     /* Intercept Ctrl+Z before Edit control's default handler */
     if (msg == WM_KEYDOWN && wParam == 'Z' && GetKeyState(VK_CONTROL) < 0) {
         if (!Undo_Perform()) {
@@ -365,15 +605,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (msg == WM_KEYDOWN && wParam == 'X' && GetKeyState(VK_CONTROL) < 0) {
         DWORD selStart, selEnd;
         SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-        if (selEnd > selStart) {
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                LocalFree(buf);
-            }
-        }
+        RecordUndoDeleteRange(hwnd, selStart, selEnd);
         SendMessageW(hwnd, WM_CUT, 0, 0);
         return 0;
     }
@@ -382,21 +614,19 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (msg == WM_KEYDOWN && wParam == 'V' && GetKeyState(VK_CONTROL) < 0) {
         DWORD selStart, selEnd;
         SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-        if (selEnd > selStart) {
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                LocalFree(buf);
-            }
-        }
         if (OpenClipboard(hwnd)) {
             HANDLE hData = GetClipboardData(CF_UNICODETEXT);
             if (hData) {
                 wchar_t *pText = (wchar_t *)hData;
                 if (pText && pText[0]) {
-                    Undo_RecordInsert(selStart, pText, -1);
+                    if (selEnd > selStart) {
+                        Undo_BeginGroup();
+                        RecordUndoDeleteRange(hwnd, selStart, selEnd);
+                        Undo_RecordInsert(selStart, pText, -1);
+                        Undo_EndGroup();
+                    } else {
+                        Undo_RecordInsert(selStart, pText, -1);
+                    }
                 }
             }
             CloseClipboard();
@@ -413,25 +643,11 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             /* No selection - deleting single char at cursor */
             int len = GetWindowTextLengthW(hwnd);
             if ((int)selStart < len) {
-                wchar_t ch[2];
-                wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-                if (buf) {
-                    GetWindowTextW(hwnd, buf, len + 1);
-                    ch[0] = buf[selStart];
-                    ch[1] = 0;
-                    Undo_RecordDelete(selStart, ch, 1);
-                    LocalFree(buf);
-                }
+                RecordUndoDeleteRange(hwnd, selStart, selStart + 1);
             }
         } else {
             /* Selection - record selected text */
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                LocalFree(buf);
-            }
+            RecordUndoDeleteRange(hwnd, selStart, selEnd);
         }
     }
     
@@ -441,25 +657,10 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
         if (selStart == selEnd && selStart > 0) {
             /* No selection - deleting char before cursor */
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t ch[2];
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                ch[0] = buf[selStart - 1];
-                ch[1] = 0;
-                Undo_RecordDelete(selStart - 1, ch, 1);
-                LocalFree(buf);
-            }
+            RecordUndoDeleteRange(hwnd, selStart - 1, selStart);
         } else if (selEnd > selStart) {
             /* Selection - record selected text */
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                LocalFree(buf);
-            }
+            RecordUndoDeleteRange(hwnd, selStart, selEnd);
         }
     }
 
@@ -548,17 +749,19 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
         /* If there's a selection, it will be replaced - record deletion first */
         if (selEnd > selStart) {
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                LocalFree(buf);
+            if (!g_bReplaceTypingGroupOpen) {
+                Undo_BeginGroup();
+                g_bReplaceTypingGroupOpen = 1;
             }
+            RecordUndoDeleteRange(hwnd, selStart, selEnd);
+            ch[0] = (wchar_t)wParam;
+            ch[1] = 0;
+            Undo_RecordInsert(selStart, ch, 1);
+        } else {
+            ch[0] = (wchar_t)wParam;
+            ch[1] = 0;
+            Undo_RecordInsert(selStart, ch, 1);
         }
-        ch[0] = (wchar_t)wParam;
-        ch[1] = 0;
-        Undo_RecordInsert(selStart, ch, 1);
     }
     
     /* Track Enter key */
@@ -567,17 +770,19 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         wchar_t ch[2];
         SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
         if (selEnd > selStart) {
-            int len = GetWindowTextLengthW(hwnd);
-            wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-            if (buf) {
-                GetWindowTextW(hwnd, buf, len + 1);
-                Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                LocalFree(buf);
+            if (!g_bReplaceTypingGroupOpen) {
+                Undo_BeginGroup();
+                g_bReplaceTypingGroupOpen = 1;
             }
+            RecordUndoDeleteRange(hwnd, selStart, selEnd);
+            ch[0] = '\r';
+            ch[1] = 0;
+            Undo_RecordInsert(selStart, ch, 1);
+        } else {
+            ch[0] = '\r';
+            ch[1] = 0;
+            Undo_RecordInsert(selStart, ch, 1);
         }
-        ch[0] = '\r';
-        ch[1] = 0;
-        Undo_RecordInsert(selStart, ch, 1);
     }
 
     /* Block WM_CHAR for Ctrl+key combos we handle (prevents beep) */
@@ -617,6 +822,10 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         ClearStatusMessage();
         UpdateStatus();
         RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
+    }
+
+    if (msg == WM_KILLFOCUS) {
+        CloseReplaceTypingGroup();
     }
     
     return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
@@ -1278,8 +1487,10 @@ static void DoReplaceOne(void)
         replCol = selStart - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, replLine - 1, 0) + 1;
         
         /* Record undo: delete found text, insert replacement */
+        Undo_BeginGroup();
         Undo_RecordDelete(selStart, buf + selStart, selLen);
         Undo_RecordInsert(selStart, g_replaceText, -1);
+        Undo_EndGroup();
         SendMessage(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)g_replaceText);
         g_bDirty = 1;
         UpdateTitle();
@@ -2968,15 +3179,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 DWORD selStart, selEnd;
                 SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-                if (selEnd > selStart) {
-                    int len = GetWindowTextLengthW(g_hwndEdit);
-                    wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-                    if (buf) {
-                        GetWindowTextW(g_hwndEdit, buf, len + 1);
-                        Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                        LocalFree(buf);
-                    }
-                }
+                RecordUndoDeleteRange(g_hwndEdit, selStart, selEnd);
             }
             SendMessageW(g_hwndEdit, WM_CUT, 0, 0);
             SetFocus(g_hwndEdit);
@@ -2991,23 +3194,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 DWORD selStart, selEnd;
                 SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-                /* Record deletion of selection if any */
-                if (selEnd > selStart) {
-                    int len = GetWindowTextLengthW(g_hwndEdit);
-                    wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-                    if (buf) {
-                        GetWindowTextW(g_hwndEdit, buf, len + 1);
-                        Undo_RecordDelete(selStart, buf + selStart, selEnd - selStart);
-                        LocalFree(buf);
-                    }
-                }
                 /* Get clipboard text to record insert */
                 if (OpenClipboard(hwnd)) {
                     HANDLE hData = GetClipboardData(CF_UNICODETEXT);
                     if (hData) {
                         wchar_t *pText = (wchar_t *)hData;
                         if (pText && pText[0]) {
-                            Undo_RecordInsert(selStart, pText, -1);
+                            if (selEnd > selStart) {
+                                Undo_BeginGroup();
+                                RecordUndoDeleteRange(g_hwndEdit, selStart, selEnd);
+                                Undo_RecordInsert(selStart, pText, -1);
+                                Undo_EndGroup();
+                            } else {
+                                Undo_RecordInsert(selStart, pText, -1);
+                            }
                         }
                     }
                     CloseClipboard();
@@ -3026,6 +3226,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 int line, lineStart, lineEnd, len;
                 DWORD selStart, selEnd;
+                wchar_t *cutText = NULL;
+                int cutLen = 0;
                 SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
                 line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
                 lineStart = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line, 0);
@@ -3033,26 +3235,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 len = GetWindowTextLengthW(g_hwndEdit);
                 if (lineEnd < 0) lineEnd = len;  /* Last line */
                 if (lineEnd > lineStart) {
-                    wchar_t *buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-                    if (buf) {
-                        int lineLen = lineEnd - lineStart;
-                        GetWindowTextW(g_hwndEdit, buf, len + 1);
-                        Undo_RecordDelete(lineStart, buf + lineStart, lineLen);
+                    if (CaptureEditRangeText(g_hwndEdit, lineStart, lineEnd, &cutText, &cutLen)) {
+                        Undo_RecordDelete(lineStart, cutText, cutLen);
                         /* Copy to clipboard */
                         if (OpenClipboard(hwnd)) {
-                            HLOCAL hMem = LocalAlloc(LMEM_MOVEABLE, (lineLen + 1) * sizeof(wchar_t));
+                            HLOCAL hMem = LocalAlloc(LMEM_MOVEABLE, (cutLen + 1) * sizeof(wchar_t));
                             if (hMem) {
                                 wchar_t *p = (wchar_t *)LocalLock(hMem);
                                 int i;
-                                for (i = 0; i < lineLen; i++) p[i] = buf[lineStart + i];
-                                p[lineLen] = 0;
+                                for (i = 0; i < cutLen; i++) p[i] = cutText[i];
+                                p[cutLen] = 0;
                                 LocalUnlock(hMem);
                                 EmptyClipboard();
                                 SetClipboardData(CF_UNICODETEXT, hMem);
                             }
                             CloseClipboard();
                         }
-                        LocalFree(buf);
+                        LocalFree(cutText);
                     }
                     SendMessage(g_hwndEdit, EM_SETSEL, lineStart, lineEnd);
                     SendMessage(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"");
@@ -3297,6 +3496,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        CloseReplaceTypingGroup();
         while (g_busyDepth > 0) EndBusyCursor(L"destroy");
         if (g_lineNumTimerActive) {
             KillTimer(hwnd, LINENUM_TIMER_ID);

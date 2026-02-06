@@ -41,6 +41,10 @@ int Undo_Perform(void);
 /* Perform redo (Ctrl+Y) - returns 1 if redo was performed */
 int Undo_Redo(void);
 
+/* Group multiple records into a single undo/redo step */
+void Undo_BeginGroup(void);
+void Undo_EndGroup(void);
+
 /* Clear undo/redo history (call on File New/Open) */
 void Undo_Clear(void);
 
