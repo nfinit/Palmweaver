@@ -19,6 +19,22 @@
 #define ICON_SMALL 0  /* WM_SETICON parameter for small (title bar) icon */
 #endif
 
+#ifndef IDC_ARROW
+#define IDC_ARROW MAKEINTRESOURCE(32512)  /* Standard arrow cursor resource */
+#endif
+
+#ifndef IDC_WAIT
+#define IDC_WAIT MAKEINTRESOURCE(32514)  /* Standard wait/hourglass cursor resource */
+#endif
+
+#ifndef WM_SETCURSOR
+#define WM_SETCURSOR 0x0020  /* Cursor-setting message missing in some CE headers */
+#endif
+
+#ifndef SM_MOUSEPRESENT
+#define SM_MOUSEPRESENT 19  /* GetSystemMetrics index for mouse presence */
+#endif
+
 #ifndef IDI_PALMWEAVER
 #define IDI_PALMWEAVER 1  /* Resource ID fallback if resource.h not included */
 #endif
@@ -54,6 +70,8 @@ static int g_lineNumWidth = 20;
 static UINT g_lineNumDirtyFlags = 0;
 static int g_lineNumTimerActive = 0;
 static UINT g_lineNumTextSeq = 0;
+static int g_busyDepth = 0;
+static int g_bMousePresent = 1;
 
 #define LINENUM_TIMER_ID         0x4C4E  /* 'LN' */
 #define LINENUM_TIMER_SCROLL_MS  60
@@ -63,6 +81,7 @@ static UINT g_lineNumTextSeq = 0;
 #define LINENUM_DIRTY_LAYOUT     0x04
 #define EDIT_TEXT_LIMIT          0x7FFFFFFE
 #define STATUS_TOTALS_INTERVAL_MS 350
+#define BUSY_TEXT_THRESHOLD      65535
 
 /* Theme colors: {foreground, background} */
 static COLORREF g_themes[][2] = {
@@ -114,6 +133,7 @@ static const WCHAR g_szFilter[] = L"Text Files (*.txt)\0*.txt\0All Files (*.*)\0
 
 /* Status bar message */
 static wchar_t g_szStatusMsg[128] = L"";
+static int g_bForceStatusRefresh = 0;
 
 /* Forward declarations */
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -123,6 +143,9 @@ static void CreateMenuBar(HWND hwndCB);
 static void OnSize(HWND hwnd, int cx, int cy);
 static void ShowAboutDialog(HWND hwndParent);
 static void UpdateTitle(void);
+static void BeginBusyCursor(const wchar_t *tag);
+static void EndBusyCursor(const wchar_t *tag);
+static void ForceIdleCursor(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
 static void ClearStatusMessage(void);
@@ -160,6 +183,36 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
 /* External: settings */
 void LoadSettings(void);
 void SaveSettings(void);
+
+static void ForceIdleCursor(void)
+{
+    if (!g_bMousePresent) {
+        SetCursor(NULL);
+        return;
+    }
+
+    {
+        HCURSOR hArrow = LoadCursor(NULL, IDC_ARROW);
+        if (hArrow) SetCursor(hArrow);
+        else SetCursor(NULL);
+    }
+}
+
+static void BeginBusyCursor(const wchar_t *tag)
+{
+    (void)tag;
+    g_busyDepth++;
+    if (g_hwndStatus) UpdateStatus();
+}
+
+static void EndBusyCursor(const wchar_t *tag)
+{
+    if (g_busyDepth <= 0) return;
+
+    (void)tag;
+    g_busyDepth--;
+    if (g_hwndStatus) UpdateStatus();
+}
 
 /*
  * HandleGlobalKeys - Centralized keyboard handler for app-wide shortcuts.
@@ -585,6 +638,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     hdc = GetDC(NULL);
     g_bColorDisplay = (GetDeviceCaps(hdc, BITSPIXEL) > 4) ? 1 : 0;
     ReleaseDC(NULL, hdc);
+    g_bMousePresent = GetSystemMetrics(SM_MOUSEPRESENT) ? 1 : 0;
 
     if (!InitApplication(hInstance)) {
         return 1;
@@ -613,6 +667,7 @@ static BOOL InitApplication(HINSTANCE hInstance)
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;
     wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_PALMWEAVER));
+    wc.hCursor = NULL;  /* We manage busy cursor explicitly when needed. */
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = g_szClassName;
 
@@ -991,6 +1046,7 @@ static void DoFindNext(void)
 {
     int len, findLen, start, i, j, k;
     int canSelectRange;
+    int busy = 0;
     wchar_t *buf;
     wchar_t msg[96];
     DWORD selStart, selEnd;
@@ -1003,8 +1059,20 @@ static void DoFindNext(void)
     canSelectRange = (len <= 65535);
     if (len == 0) return;
 
+    if (len > BUSY_TEXT_THRESHOLD) {
+        SetStatusMessage(L"Searching...");
+        BeginBusyCursor(L"find");
+        busy = 1;
+    }
+
     buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    if (!buf) return;
+    if (!buf) {
+        if (busy) {
+            EndBusyCursor(L"find");
+            ClearStatusMessage();
+        }
+        return;
+    }
     GetWindowTextW(g_hwndEdit, buf, len + 1);
 
     SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
@@ -1039,6 +1107,7 @@ static void DoFindNext(void)
             }
             SetStatusMessage(msg);
             LocalFree(buf);
+            if (busy) EndBusyCursor(L"find");
             return;
         }
     }
@@ -1069,10 +1138,12 @@ static void DoFindNext(void)
             }
             SetStatusMessage(msg);
             LocalFree(buf);
+            if (busy) EndBusyCursor(L"find");
             return;
         }
     }
     LocalFree(buf);
+    if (busy) EndBusyCursor(L"find");
     SetStatusMessage(L"Text not found");
 }
 
@@ -1234,6 +1305,7 @@ static void DoReplaceOne(void)
 static int DoReplaceAll(void)
 {
     int len, findLen, replLen, count = 0, i, j;
+    int busy = 0;
     wchar_t *buf, *newBuf, *p;
 
     if (!g_findText[0]) return 0;
@@ -1242,9 +1314,20 @@ static int DoReplaceAll(void)
     replLen = lstrlenW(g_replaceText);
     len = GetWindowTextLengthW(g_hwndEdit);
     if (len == 0) return 0;
+    if (len > BUSY_TEXT_THRESHOLD) {
+        SetStatusMessage(L"Replacing...");
+        BeginBusyCursor(L"replall");
+        busy = 1;
+    }
 
     buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    if (!buf) return 0;
+    if (!buf) {
+        if (busy) {
+            EndBusyCursor(L"replall");
+            ClearStatusMessage();
+        }
+        return 0;
+    }
     GetWindowTextW(g_hwndEdit, buf, len + 1);
 
     /* Count matches */
@@ -1257,12 +1340,23 @@ static int DoReplaceAll(void)
 
     if (count == 0) {
         LocalFree(buf);
+        if (busy) {
+            EndBusyCursor(L"replall");
+            ClearStatusMessage();
+        }
         return 0;
     }
 
     newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED,
         (len + count * (replLen - findLen) + 1) * sizeof(wchar_t));
-    if (!newBuf) { LocalFree(buf); return 0; }
+    if (!newBuf) {
+        LocalFree(buf);
+        if (busy) {
+            EndBusyCursor(L"replall");
+            ClearStatusMessage();
+        }
+        return 0;
+    }
 
     p = newBuf;
     for (i = 0; i <= len; i++) {
@@ -1289,6 +1383,10 @@ static int DoReplaceAll(void)
 
     LocalFree(newBuf);
     LocalFree(buf);
+    if (busy) {
+        EndBusyCursor(L"replall");
+        ClearStatusMessage();
+    }
     return count;
 }
 
@@ -1484,6 +1582,7 @@ static void DoReflow(void)
 {
     int selStart, selEnd, paraStart, paraEnd;
     int len, col, i, wordStart;
+    int busy = 0;
     wchar_t *text, *out, *p;
 
     SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
@@ -1521,11 +1620,20 @@ static void DoReflow(void)
     if (selEnd <= selStart) return;
 
     len = selEnd - selStart;
+    if (len > BUSY_TEXT_THRESHOLD) {
+        SetStatusMessage(L"Reflowing...");
+        BeginBusyCursor(L"reflow");
+        busy = 1;
+    }
     text = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
     out = (wchar_t *)LocalAlloc(LMEM_FIXED, (len * 2 + 1) * sizeof(wchar_t));
     if (!text || !out) {
         if (text) LocalFree(text);
         if (out) LocalFree(out);
+        if (busy) {
+            EndBusyCursor(L"reflow");
+            ClearStatusMessage();
+        }
         return;
     }
 
@@ -1536,6 +1644,10 @@ static void DoReflow(void)
         if (!fullText) {
             LocalFree(text);
             LocalFree(out);
+            if (busy) {
+                EndBusyCursor(L"reflow");
+                ClearStatusMessage();
+            }
             return;
         }
         GetWindowTextW(g_hwndEdit, fullText, totalLen + 1);
@@ -1604,6 +1716,10 @@ static void DoReflow(void)
 
     LocalFree(text);
     LocalFree(out);
+    if (busy) {
+        EndBusyCursor(L"reflow");
+        ClearStatusMessage();
+    }
     SetFocus(g_hwndEdit);
 }
 
@@ -2173,6 +2289,7 @@ static void OpenRecentFile(int index)
     char *pBuf;
     wchar_t *pWBuf;
     int i;
+    int busy = 0;
 
     if (index < 0 || index >= g_recentCount) return;
     if (!PromptSave()) return;
@@ -2187,9 +2304,18 @@ static void OpenRecentFile(int index)
     }
 
     dwSize = GetFileSize(hFile, NULL);
+    if (dwSize > BUSY_TEXT_THRESHOLD) {
+        SetStatusMessage(L"Loading file...");
+        BeginBusyCursor(L"openrecent");
+        busy = 1;
+    }
     pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 1);
     if (!pBuf) {
         CloseHandle(hFile);
+        if (busy) {
+            EndBusyCursor(L"openrecent");
+            ClearStatusMessage();
+        }
         return;
     }
 
@@ -2219,6 +2345,10 @@ static void OpenRecentFile(int index)
     UpdateTitle();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     AddRecentFile(path);
+    if (busy) {
+        EndBusyCursor(L"openrecent");
+        ClearStatusMessage();
+    }
 }
 
 /*
@@ -2235,6 +2365,14 @@ static void UpdateStatus(void)
     int lineStart;
     DWORD nowTick;
     wchar_t buf[64];
+
+    if (!g_hwndStatus) return;
+
+    if (g_bForceStatusRefresh) {
+        s_lastSelStart = (DWORD)-1;
+        s_nextTotalsTick = 0;
+        g_bForceStatusRefresh = 0;
+    }
 
     /* If there's a status message, show it once then let it persist */
     if (g_szStatusMsg[0]) {
@@ -2280,11 +2418,12 @@ static void UpdateStatus(void)
  */
 static void SetStatusMessage(const wchar_t *msg)
 {
-    if (msg) {
+    if (msg && g_hwndStatus) {
         int i;
         for (i = 0; i < 127 && msg[i]; i++) g_szStatusMsg[i] = msg[i];
         g_szStatusMsg[i] = 0;
         SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)g_szStatusMsg);
+        UpdateWindow(g_hwndStatus);
     }
 }
 
@@ -2295,7 +2434,9 @@ static void ClearStatusMessage(void)
 {
     if (g_szStatusMsg[0]) {
         g_szStatusMsg[0] = 0;
+        g_bForceStatusRefresh = 1;
         UpdateStatus();
+        if (g_hwndStatus) UpdateWindow(g_hwndStatus);
     }
 }
 
@@ -2395,6 +2536,7 @@ static int DoFileOpen(void)
     char *pBuf;
     wchar_t *pWBuf;
     int i;
+    int busy = 0;
 
     if (!PromptSave()) return 0;
 
@@ -2411,11 +2553,20 @@ static int DoFileOpen(void)
     }
 
     dwSize = GetFileSize(hFile, NULL);
+    if (dwSize > BUSY_TEXT_THRESHOLD) {
+        SetStatusMessage(L"Loading file...");
+        BeginBusyCursor(L"open");
+        busy = 1;
+    }
 
     /* Allocate buffer for file content + null */
     pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 1);
     if (!pBuf) {
         CloseHandle(hFile);
+        if (busy) {
+            EndBusyCursor(L"open");
+            ClearStatusMessage();
+        }
         MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
         return 0;
     }
@@ -2452,6 +2603,10 @@ static int DoFileOpen(void)
     UpdateTitle();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     AddRecentFile(szFile);
+    if (busy) {
+        EndBusyCursor(L"open");
+        ClearStatusMessage();
+    }
     return 1;
 }
 
@@ -3123,6 +3278,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
 
+    case WM_SETCURSOR:
+    {
+        if (!g_bMousePresent) SetCursor(NULL);
+        else ForceIdleCursor();
+        return 1;
+    }
+
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORSTATIC:
         if ((HWND)lParam == g_hwndLineNum || (HWND)lParam == g_hwndEdit) {
@@ -3135,6 +3297,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        while (g_busyDepth > 0) EndBusyCursor(L"destroy");
         if (g_lineNumTimerActive) {
             KillTimer(hwnd, LINENUM_TIMER_ID);
             g_lineNumTimerActive = 0;
