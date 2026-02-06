@@ -95,8 +95,10 @@ static int g_bMousePresent = 1;
 #define STATUS_TOTALS_INTERVAL_MS 350
 #define BUSY_TEXT_THRESHOLD      65535
 #define PAGED_MODE_THRESHOLD_CHARS 60000
-#define PAGED_WINDOW_CHARS        49152
-#define PAGED_EDGE_CHARS          4096
+#define PAGED_WINDOW_CHARS_NOWRAP 49152
+#define PAGED_WINDOW_CHARS_WRAP   16384
+#define PAGED_EDGE_CHARS_NOWRAP   4096
+#define PAGED_EDGE_CHARS_WRAP     2048
 #define PAGED_VSCROLL_EXTRA_W      0
 #define PAGED_VSCROLL_SEAM_OVERLAP 2
 
@@ -195,6 +197,8 @@ static int PagedRebuildLineStarts(void);
 static int PagedCommitPage(void);
 static int PagedLoadWindowAt(int globalPos);
 static int PagedEnableWithText(wchar_t *text, int len);
+static int PagedGetWindowChars(void);
+static int PagedGetEdgeChars(void);
 static int PagedGetGlobalSelStart(void);
 static void PagedIndexToLineCol(int index, int *outLine, int *outCol);
 static int PagedGetGlobalLineFromLocalChar(int localChar);
@@ -317,6 +321,25 @@ static int PagedRebuildLineStarts(void)
     return 1;
 }
 
+static int PagedGetWindowChars(void)
+{
+    int windowChars = g_bWordWrap ? PAGED_WINDOW_CHARS_WRAP : PAGED_WINDOW_CHARS_NOWRAP;
+    if (windowChars < 4096) windowChars = 4096;
+    return windowChars;
+}
+
+static int PagedGetEdgeChars(void)
+{
+    int windowChars = PagedGetWindowChars();
+    int edgeChars = g_bWordWrap ? PAGED_EDGE_CHARS_WRAP : PAGED_EDGE_CHARS_NOWRAP;
+    int maxEdge = windowChars / 3;
+
+    if (maxEdge < 512) maxEdge = 512;
+    if (edgeChars > maxEdge) edgeChars = maxEdge;
+    if (edgeChars < 512) edgeChars = 512;
+    return edgeChars;
+}
+
 static int PagedCommitPage(void)
 {
     int curLen;
@@ -370,6 +393,7 @@ static int PagedCommitPage(void)
 static int PagedLoadWindowAt(int globalPos)
 {
     int start, end, maxStart, pageLen, localPos, i;
+    int windowChars;
     wchar_t *pageText;
 
     if (!g_bPagedMode || !g_pagedText || !g_hwndEdit) return 0;
@@ -379,14 +403,15 @@ static int PagedLoadWindowAt(int globalPos)
     if (globalPos < 0) globalPos = 0;
     if (globalPos > g_pagedTextLen) globalPos = g_pagedTextLen;
 
-    maxStart = g_pagedTextLen - PAGED_WINDOW_CHARS;
+    windowChars = PagedGetWindowChars();
+    maxStart = g_pagedTextLen - windowChars;
     if (maxStart < 0) maxStart = 0;
 
-    start = globalPos - (PAGED_WINDOW_CHARS / 3);
+    start = globalPos - (windowChars / 3);
     if (start < 0) start = 0;
     if (start > maxStart) start = maxStart;
 
-    end = start + PAGED_WINDOW_CHARS;
+    end = start + windowChars;
     if (end > g_pagedTextLen) end = g_pagedTextLen;
     pageLen = end - start;
     if (pageLen < 0) pageLen = 0;
@@ -673,20 +698,24 @@ static void PagedMaybeShiftWindowByCaret(void)
 {
     DWORD selStart, selEnd;
     int globalSel;
+    int windowChars;
+    int edgeChars;
 
     if (!g_bPagedMode || g_bPagedLoading || !g_hwndEdit) return;
-    if (g_pagedTextLen <= PAGED_WINDOW_CHARS) return;
+    windowChars = PagedGetWindowChars();
+    edgeChars = PagedGetEdgeChars();
+    if (g_pagedTextLen <= windowChars) return;
 
     SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
     (void)selEnd;
     globalSel = g_pagedPageStart + (int)selStart;
 
-    if ((int)selStart >= g_pagedPageLen - PAGED_EDGE_CHARS && g_pagedPageStart + g_pagedPageLen < g_pagedTextLen) {
-        int target = globalSel + PAGED_EDGE_CHARS;
+    if ((int)selStart >= g_pagedPageLen - edgeChars && g_pagedPageStart + g_pagedPageLen < g_pagedTextLen) {
+        int target = globalSel + edgeChars;
         if (target > g_pagedTextLen) target = g_pagedTextLen;
         PagedLoadWindowAt(target);
-    } else if ((int)selStart <= PAGED_EDGE_CHARS && g_pagedPageStart > 0) {
-        int target = globalSel - PAGED_EDGE_CHARS;
+    } else if ((int)selStart <= edgeChars && g_pagedPageStart > 0) {
+        int target = globalSel - edgeChars;
         if (target < 0) target = 0;
         PagedLoadWindowAt(target);
     }
@@ -695,8 +724,12 @@ static void PagedMaybeShiftWindowByCaret(void)
 static void PagedHandleVScrollEdge(UINT scrollCode)
 {
     int firstVisible, lineCount;
+    int windowChars;
+    int edgeChars;
 
     if (!g_bPagedMode || g_bPagedLoading || !g_hwndEdit) return;
+    windowChars = PagedGetWindowChars();
+    edgeChars = PagedGetEdgeChars();
 
     firstVisible = (int)SendMessageW(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
     lineCount = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
@@ -704,13 +737,13 @@ static void PagedHandleVScrollEdge(UINT scrollCode)
     if ((scrollCode == SB_LINEDOWN || scrollCode == SB_PAGEDOWN || scrollCode == SB_BOTTOM ||
          scrollCode == SB_THUMBPOSITION || scrollCode == SB_ENDSCROLL) &&
         firstVisible >= lineCount - 2 && g_pagedPageStart + g_pagedPageLen < g_pagedTextLen) {
-        int target = g_pagedPageStart + g_pagedPageLen - (PAGED_EDGE_CHARS / 2);
+        int target = g_pagedPageStart + g_pagedPageLen - (edgeChars / 2);
         if (target < 0) target = 0;
         PagedLoadWindowAt(target);
     } else if ((scrollCode == SB_LINEUP || scrollCode == SB_PAGEUP || scrollCode == SB_TOP ||
                 scrollCode == SB_THUMBPOSITION || scrollCode == SB_ENDSCROLL) &&
                firstVisible <= 1 && g_pagedPageStart > 0) {
-        int target = g_pagedPageStart - (PAGED_WINDOW_CHARS / 2);
+        int target = g_pagedPageStart - (windowChars / 2);
         if (target < 0) target = 0;
         PagedLoadWindowAt(target);
     }
@@ -4188,6 +4221,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 wchar_t *text = NULL;
                 DWORD editStyle;
                 int selStart, selEnd;
+                int pagedCaretGlobal = 0;
 
                 /* Save text and selection */
                 if (textLen > 0) {
@@ -4195,6 +4229,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     if (text) GetWindowTextW(g_hwndEdit, text, textLen + 1);
                 }
                 SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+                if (g_bPagedMode) pagedCaretGlobal = g_pagedPageStart + selStart;
 
                 g_bWordWrap = !g_bWordWrap;
                 CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP,
@@ -4227,7 +4262,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     SetWindowTextW(g_hwndEdit, text);
                     LocalFree(text);
                 }
-                SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
+                if (g_bPagedMode) {
+                    if (!PagedLoadWindowAt(pagedCaretGlobal)) {
+                        SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
+                    }
+                } else {
+                    SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
+                }
 
                 SendMessage(hwnd, WM_SIZE, 0, 0);
                 RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
@@ -4241,7 +4282,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
             ShowWindow(g_hwndLineNum, g_bShowLineNums ? SW_SHOW : SW_HIDE);
             SendMessage(hwnd, WM_SIZE, 0, 0);
-            if (g_bShowLineNums) RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
+            if (g_bShowLineNums) RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 0);
             SetFocus(g_hwndEdit);
             return 0;
 
@@ -4263,17 +4304,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_VIEW_SCROLLBARS:
             {
                 LONG style = GetWindowLong(g_hwndEdit, GWL_STYLE);
+                LONG newStyle = style;
                 g_bShowScrollbars = !g_bShowScrollbars;
                 if (g_bShowScrollbars) {
-                    if (!g_bPagedMode) style |= WS_VSCROLL;
-                    if (!g_bWordWrap) style |= WS_HSCROLL;
+                    if (!g_bPagedMode) newStyle |= WS_VSCROLL;
+                    if (!g_bWordWrap) newStyle |= WS_HSCROLL;
                 } else {
-                    style &= ~(WS_VSCROLL | WS_HSCROLL);
+                    newStyle &= ~(WS_VSCROLL | WS_HSCROLL);
                 }
-                if (g_bPagedMode) style &= ~WS_VSCROLL;
-                SetWindowLong(g_hwndEdit, GWL_STYLE, style);
-                SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                if (g_bPagedMode) newStyle &= ~WS_VSCROLL;
+                if (newStyle != style) {
+                    SetWindowLong(g_hwndEdit, GWL_STYLE, newStyle);
+                    SetWindowPos(g_hwndEdit, NULL, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+                }
                 if (g_bPagedMode) SetEditVerticalScrollbarVisible(0);
                 CheckMenuItem(g_hViewMenu, IDM_VIEW_SCROLLBARS,
                     g_bShowScrollbars ? MF_CHECKED : MF_UNCHECKED);
