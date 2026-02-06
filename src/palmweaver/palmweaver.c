@@ -2366,9 +2366,10 @@ static void UpdateLineNumbers(void)
         if (newWidth != g_lineNumWidth) {
             g_lineNumWidth = newWidth;
             SendMessage(g_hwndMain, WM_SIZE, 0, 0);
-            UpdateWindow(g_hwndMain);
+            /* Let paint happen naturally; avoid forced synchronous redraw here. */
+            InvalidateRect(g_hwndLineNum, NULL, FALSE);
+            InvalidateRect(g_hwndEdit, NULL, FALSE);
             InvalidateColumnIndicator();
-            UpdateWindow(g_hwndEdit);
         }
     }
 
