@@ -181,6 +181,10 @@ static int PagedLoadWindowAt(int globalPos);
 static int PagedEnableWithText(wchar_t *text, int len);
 static int PagedGetGlobalSelStart(void);
 static void PagedIndexToLineCol(int index, int *outLine, int *outCol);
+static int PagedGetGlobalLineFromLocalChar(int localChar);
+static int PagedGetVisibleRows(void);
+static void PagedSyncVScroll(void);
+static int PagedHandleThumbScroll(UINT scrollCode);
 static void PagedMaybeShiftWindowByCaret(void);
 static void PagedHandleVScrollEdge(UINT scrollCode);
 static void DoFileNew(void);
@@ -382,6 +386,8 @@ static int PagedLoadWindowAt(int globalPos)
     if (localPos > pageLen) localPos = pageLen;
     SendMessageW(g_hwndEdit, EM_SETSEL, localPos, localPos);
     SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+    /* Keep scrollbar position stable before heavier refresh work. */
+    PagedSyncVScroll();
     Undo_Clear();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     UpdateStatus();
@@ -459,6 +465,124 @@ static void PagedIndexToLineCol(int index, int *outLine, int *outCol)
 
     *outLine = line;
     *outCol = col;
+}
+
+static int PagedGetGlobalLineFromLocalChar(int localChar)
+{
+    int globalIdx;
+    int lo, hi;
+
+    if (!g_bPagedMode || !g_pagedLineStarts || g_pagedLineCount <= 0) return 0;
+
+    if (localChar < 0) localChar = 0;
+    if (localChar > g_pagedPageLen) localChar = g_pagedPageLen;
+    globalIdx = g_pagedPageStart + localChar;
+    if (globalIdx < 0) globalIdx = 0;
+    if (globalIdx > g_pagedTextLen) globalIdx = g_pagedTextLen;
+
+    lo = 0;
+    hi = g_pagedLineCount;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) >> 1);
+        if (g_pagedLineStarts[mid] <= globalIdx) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo <= 0) return 0;
+    if (lo > g_pagedLineCount) return g_pagedLineCount - 1;
+    return lo - 1;
+}
+
+static int PagedGetVisibleRows(void)
+{
+    HDC hdc;
+    HFONT hOld;
+    TEXTMETRICW tm;
+    RECT rc;
+    int lineHeight = 0;
+    int rows;
+
+    if (!g_hwndEdit || !g_hFont) return 1;
+
+    GetClientRect(g_hwndEdit, &rc);
+    hdc = GetDC(g_hwndEdit);
+    if (hdc) {
+        hOld = (HFONT)SelectObject(hdc, g_hFont);
+        if (GetTextMetricsW(hdc, &tm)) lineHeight = tm.tmHeight;
+        SelectObject(hdc, hOld);
+        ReleaseDC(g_hwndEdit, hdc);
+    }
+
+    if (lineHeight <= 0) rows = 1;
+    else rows = (rc.bottom - rc.top) / lineHeight;
+    if (rows < 1) rows = 1;
+    return rows;
+}
+
+static void PagedSyncVScroll(void)
+{
+    SCROLLINFO si;
+    int firstVisible, localChar;
+    int globalTopLine;
+    int visibleRows;
+
+    if (!g_bPagedMode || !g_hwndEdit || !g_pagedLineStarts || g_pagedLineCount <= 0) return;
+
+    firstVisible = (int)SendMessageW(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    localChar = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, firstVisible, 0);
+    if (localChar < 0) localChar = 0;
+    globalTopLine = PagedGetGlobalLineFromLocalChar(localChar);
+    visibleRows = PagedGetVisibleRows();
+
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0;
+    si.nMax = (g_pagedLineCount > 0) ? (g_pagedLineCount - 1) : 0;
+    si.nPage = (UINT)visibleRows;
+    si.nPos = globalTopLine;
+    SetScrollInfo(g_hwndEdit, SB_VERT, &si, TRUE);
+}
+
+static int PagedHandleThumbScroll(UINT scrollCode)
+{
+    SCROLLINFO si;
+    int targetLine;
+    int targetIdx;
+
+    if (!g_bPagedMode || !g_pagedLineStarts || g_pagedLineCount <= 0) return 0;
+    if (!(scrollCode == SB_THUMBTRACK || scrollCode == SB_THUMBPOSITION ||
+          scrollCode == SB_TOP || scrollCode == SB_BOTTOM)) return 0;
+
+    /* Suppress page-local thumb tracking; jump once on final thumb position. */
+    if (scrollCode == SB_THUMBTRACK) return 1;
+
+    if (scrollCode == SB_TOP) targetLine = 0;
+    else if (scrollCode == SB_BOTTOM) targetLine = g_pagedLineCount - 1;
+    else {
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_TRACKPOS | SIF_POS;
+        if (!GetScrollInfo(g_hwndEdit, SB_VERT, &si)) return 1;
+        targetLine = si.nTrackPos;
+    }
+
+    if (targetLine < 0) targetLine = 0;
+    if (targetLine >= g_pagedLineCount) targetLine = g_pagedLineCount - 1;
+
+    targetIdx = g_pagedLineStarts[targetLine];
+    if (targetIdx < 0) targetIdx = 0;
+    if (targetIdx > g_pagedTextLen) targetIdx = g_pagedTextLen;
+
+    if (PagedLoadWindowAt(targetIdx)) {
+        int localIdx = targetIdx - g_pagedPageStart;
+        if (localIdx < 0) localIdx = 0;
+        if (localIdx > g_pagedPageLen) localIdx = g_pagedPageLen;
+        SendMessageW(g_hwndEdit, EM_SETSEL, localIdx, localIdx);
+        SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+        RefreshEditAfterLargeJump();
+        PagedSyncVScroll();
+        RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 1);
+    }
+
+    return 1;
 }
 
 static void PagedMaybeShiftWindowByCaret(void)
@@ -1098,7 +1222,55 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         UINT scrollCode = (UINT)LOWORD(wParam);
         int refreshNow = 0;
         int skipLineNumRefresh = 0;
-        LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
+        LRESULT r;
+
+        if (g_bPagedMode) {
+            int handled = 1;
+
+            switch (scrollCode) {
+            case SB_LINEUP:
+                SendMessageW(hwnd, EM_LINESCROLL, 0, -1);
+                break;
+            case SB_LINEDOWN:
+                SendMessageW(hwnd, EM_LINESCROLL, 0, 1);
+                break;
+            case SB_PAGEUP:
+                SendMessageW(hwnd, EM_LINESCROLL, 0, -(PagedGetVisibleRows() - 1));
+                break;
+            case SB_PAGEDOWN:
+                SendMessageW(hwnd, EM_LINESCROLL, 0, PagedGetVisibleRows() - 1);
+                break;
+            case SB_TOP:
+            case SB_BOTTOM:
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION:
+                PagedHandleThumbScroll(scrollCode);
+                break;
+            case SB_ENDSCROLL:
+                break;
+            default:
+                handled = 0;
+                break;
+            }
+
+            if (handled) {
+                if (scrollCode == SB_THUMBTRACK) {
+                    /* Let thumb drag stay fluid; commit actual jump on THUMBPOSITION. */
+                } else {
+                    RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 1);
+                    if (scrollCode == SB_LINEUP || scrollCode == SB_LINEDOWN ||
+                        scrollCode == SB_PAGEUP || scrollCode == SB_PAGEDOWN ||
+                        scrollCode == SB_ENDSCROLL) {
+                        PagedHandleVScrollEdge(scrollCode);
+                    }
+                    PagedSyncVScroll();
+                }
+                if (g_bShowColumnIndicator) InvalidateColumnIndicator();
+                return 0;
+            }
+        }
+
+        r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
 
         if (scrollCode == SB_THUMBTRACK) {
             g_bVScrollThumbTrackActive = 1;
@@ -1112,6 +1284,8 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
 
         if (refreshNow) QueueEditRepaintAfterJump();
+
+        if (g_bPagedMode) PagedSyncVScroll();
 
         if (skipLineNumRefresh) {
             /* Avoid extra gutter churn during thumb tracking; refresh once at settle. */
@@ -1142,6 +1316,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         ClearStatusMessage();
         UpdateStatus();
         RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
+        if (g_bPagedMode) PagedSyncVScroll();
     }
 
     if (msg == WM_KILLFOCUS) {
@@ -1378,6 +1553,7 @@ static void OnSize(HWND hwnd, int cx, int cy)
         MoveWindow(g_hwndLineNum, 0, cbHeight, g_lineNumWidth, editHeight, TRUE);
 
     MoveWindow(g_hwndEdit, editLeft, cbHeight, cx - editLeft, editHeight, TRUE);
+    if (g_bPagedMode) PagedSyncVScroll();
 }
 
 /*
