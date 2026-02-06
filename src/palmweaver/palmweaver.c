@@ -53,12 +53,16 @@ int g_bHideTaskbar = 0;     /* Hide taskbar in fullscreen (off by default) */
 static int g_lineNumWidth = 20;
 static UINT g_lineNumDirtyFlags = 0;
 static int g_lineNumTimerActive = 0;
+static UINT g_lineNumTextSeq = 0;
 
 #define LINENUM_TIMER_ID         0x4C4E  /* 'LN' */
-#define LINENUM_TIMER_DELAY_MS   60
+#define LINENUM_TIMER_SCROLL_MS  60
+#define LINENUM_TIMER_TEXT_MS    500
 #define LINENUM_DIRTY_TEXT       0x01
 #define LINENUM_DIRTY_SCROLL     0x02
 #define LINENUM_DIRTY_LAYOUT     0x04
+#define EDIT_TEXT_LIMIT          0x7FFFFFFE
+#define STATUS_TOTALS_INTERVAL_MS 350
 
 /* Theme colors: {foreground, background} */
 static COLORREF g_themes[][2] = {
@@ -133,6 +137,7 @@ static int PromptSave(void);
 static void DoGotoLine(void);
 static void DoFind(void);
 static void DoFindNext(void);
+static void RefreshEditAfterFindJump(void);
 static void DoReplace(void);
 static void DoInsertDateTime(int mode);
 static void DoInsertRule(void);
@@ -551,10 +556,14 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         return r;
     }
 
-    if (msg == WM_KEYUP || msg == WM_LBUTTONUP || msg == WM_CHAR) {
+    if (msg == WM_CHAR) {
+        ClearStatusMessage();
+    }
+
+    if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
         ClearStatusMessage();
         UpdateStatus();
-        if (msg != WM_CHAR) RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
+        RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
     }
     
     return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
@@ -971,26 +980,35 @@ static int CharsMatch(wchar_t c1, wchar_t c2)
     return c1 == c2;
 }
 
+static void RefreshEditAfterFindJump(void)
+{
+    /* Force a full repaint after large jumps to avoid stale scroll artifacts on CE edit controls. */
+    InvalidateRect(g_hwndEdit, NULL, FALSE);
+    UpdateWindow(g_hwndEdit);
+}
+
 static void DoFindNext(void)
 {
-    int len, findLen, start, i, j;
+    int len, findLen, start, i, j, k;
+    int canSelectRange;
     wchar_t *buf;
-    wchar_t msg[64];
-    DWORD sel;
+    wchar_t msg[96];
+    DWORD selStart, selEnd;
     int line, col;
 
     if (!g_findText[0]) return;
 
     findLen = lstrlenW(g_findText);
     len = GetWindowTextLengthW(g_hwndEdit);
+    canSelectRange = (len <= 65535);
     if (len == 0) return;
 
     buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
     if (!buf) return;
     GetWindowTextW(g_hwndEdit, buf, len + 1);
 
-    SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&sel, 0);
-    start = sel + 1;
+    SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    start = (int)selStart + 1;
     if (start > len) start = 0;
 
     /* Search forward with wrap */
@@ -999,11 +1017,26 @@ static void DoFindNext(void)
             if (!CharsMatch(buf[i + j], g_findText[j])) break;
         }
         if (j == findLen) {
-            SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
-            SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-            line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
-            col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
-            wsprintfW(msg, L"Found at Ln %d, Col %d", line, col);
+            if (canSelectRange) {
+                SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
+                SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+                RefreshEditAfterFindJump();
+                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
+                col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
+                wsprintfW(msg, L"Found at Ln %d, Col %d", line, col);
+            } else {
+                line = 1;
+                col = 1;
+                for (k = 0; k < i; k++) {
+                    if (buf[k] == L'\n') {
+                        line++;
+                        col = 1;
+                    } else {
+                        col++;
+                    }
+                }
+                wsprintfW(msg, L"Found at Ln %d, Col %d (no jump: large file)", line, col);
+            }
             SetStatusMessage(msg);
             LocalFree(buf);
             return;
@@ -1014,11 +1047,26 @@ static void DoFindNext(void)
             if (!CharsMatch(buf[i + j], g_findText[j])) break;
         }
         if (j == findLen) {
-            SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
-            SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-            line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
-            col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
-            wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped)", line, col);
+            if (canSelectRange) {
+                SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
+                SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+                RefreshEditAfterFindJump();
+                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
+                col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
+                wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped)", line, col);
+            } else {
+                line = 1;
+                col = 1;
+                for (k = 0; k < i; k++) {
+                    if (buf[k] == L'\n') {
+                        line++;
+                        col = 1;
+                    } else {
+                        col++;
+                    }
+                }
+                wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped, no jump: large file)", line, col);
+            }
             SetStatusMessage(msg);
             LocalFree(buf);
             return;
@@ -1844,7 +1892,10 @@ static LRESULT CALLBACK LineNumProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
 static void RequestLineNumberRefresh(UINT flags, int immediate)
 {
+    UINT delayMs;
+
     g_lineNumDirtyFlags |= flags;
+    if (flags & LINENUM_DIRTY_TEXT) g_lineNumTextSeq++;
 
     if (!g_bShowLineNums) {
         if (g_lineNumTimerActive && g_hwndMain) {
@@ -1865,8 +1916,16 @@ static void RequestLineNumberRefresh(UINT flags, int immediate)
         return;
     }
 
+    delayMs = (flags & LINENUM_DIRTY_TEXT) ? LINENUM_TIMER_TEXT_MS : LINENUM_TIMER_SCROLL_MS;
+
+    /* Debounce text edits by restarting timer, but leave scroll timer running. */
+    if (g_lineNumTimerActive && (flags & LINENUM_DIRTY_TEXT)) {
+        KillTimer(g_hwndMain, LINENUM_TIMER_ID);
+        g_lineNumTimerActive = 0;
+    }
+
     if (!g_lineNumTimerActive) {
-        if (SetTimer(g_hwndMain, LINENUM_TIMER_ID, LINENUM_TIMER_DELAY_MS, NULL)) {
+        if (SetTimer(g_hwndMain, LINENUM_TIMER_ID, delayMs, NULL)) {
             g_lineNumTimerActive = 1;
         } else {
             g_lineNumDirtyFlags = 0;
@@ -1878,6 +1937,9 @@ static void RequestLineNumberRefresh(UINT flags, int immediate)
 static void UpdateLineNumbers(void)
 {
     static wchar_t *cachedText = NULL;
+    static int *cachedLineStarts = NULL;
+    static int cachedLineStartCount = 1;
+    static UINT cachedTextSeq = 0;
     static int cachedLen = -1;
     static int cachedFirstVisible = -1;
     static int cachedVisLines = -1;
@@ -1886,74 +1948,162 @@ static void UpdateLineNumbers(void)
     wchar_t *text = NULL;
     int i, visLines, firstVisible, pos = 0, textLen;
     int charIdx, logicalLine;
+    int textChanged;
+    int logicalTotal = 1;
+    int visibleRows, displayEnd;
+    RECT rcEdit;
+    int lineHeight = 0;
 
     if (!g_bShowLineNums || !g_hwndLineNum || !g_hFont) return;
 
     visLines = (int)SendMessage(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
     textLen = GetWindowTextLengthW(g_hwndEdit);
     firstVisible = (int)SendMessage(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    textChanged = (cachedTextSeq != g_lineNumTextSeq);
 
     /* Quick exit if scroll position unchanged and line count same */
-    if (textLen == cachedLen && firstVisible == cachedFirstVisible && visLines == cachedVisLines)
+    if (!textChanged &&
+        textLen == cachedLen &&
+        firstVisible == cachedFirstVisible &&
+        visLines == cachedVisLines)
         return;
 
-    /* Cache text for performance */
-    if (textLen == cachedLen && cachedText) {
-        text = cachedText;
-    } else {
+    /* Refresh cached text and logical line starts when content changes. */
+    if (textChanged || textLen != cachedLen || (textLen > 0 && !cachedText && !cachedLineStarts)) {
+        int newlineCount = 0;
+        int idx = 1;
+
         if (cachedText) { LocalFree(cachedText); cachedText = NULL; }
+        if (cachedLineStarts) { LocalFree(cachedLineStarts); cachedLineStarts = NULL; }
+        cachedLineStartCount = 1;
         cachedLen = textLen;
+
         if (textLen > 0) {
             cachedText = (wchar_t *)LocalAlloc(LMEM_FIXED, (textLen + 1) * sizeof(wchar_t));
             if (cachedText) GetWindowTextW(g_hwndEdit, cachedText, textLen + 1);
         }
+        text = cachedText;
+
+        cachedTextSeq = g_lineNumTextSeq;
+
+        if (text) {
+            for (i = 0; i < textLen; i++) {
+                if (text[i] == '\n') newlineCount++;
+            }
+
+            cachedLineStartCount = newlineCount + 1;
+            cachedLineStarts = (int *)LocalAlloc(LMEM_FIXED, cachedLineStartCount * sizeof(int));
+            if (cachedLineStarts) {
+                cachedLineStarts[0] = 0;
+                for (i = 0; i < textLen && idx < cachedLineStartCount; i++) {
+                    if (text[i] == '\n') cachedLineStarts[idx++] = i + 1;
+                }
+                cachedLineStartCount = idx;
+            }
+
+            /* Keep compact line-start cache and drop duplicate full-text copy. */
+            if (cachedLineStarts && cachedText) {
+                LocalFree(cachedText);
+                cachedText = NULL;
+                text = NULL;
+            }
+        }
+    } else {
         text = cachedText;
     }
 
     cachedFirstVisible = firstVisible;
     cachedVisLines = visLines;
 
+    if (cachedLineStartCount > 0) logicalTotal = cachedLineStartCount;
+
     /* Auto-size gutter width based on line count */
     {
-        int logicalTotal = 1;
-        if (text) {
-            for (i = 0; i < textLen; i++)
-                if (text[i] == '\n') logicalTotal++;
-        }
-        {
-            HDC hdc = GetDC(g_hwndLineNum);
-            HFONT hOld = (HFONT)SelectObject(hdc, g_hFont);
-            SIZE sz;
-            wchar_t numBuf[16];
-            int newWidth;
-            wsprintfW(numBuf, L"%d", logicalTotal);
-            GetTextExtentPoint32W(hdc, numBuf, lstrlenW(numBuf), &sz);
-            newWidth = sz.cx + 10;
-            if (newWidth < 20) newWidth = 20;
-            SelectObject(hdc, hOld);
-            ReleaseDC(g_hwndLineNum, hdc);
-            if (newWidth != g_lineNumWidth) {
-                g_lineNumWidth = newWidth;
-                SendMessage(g_hwndMain, WM_SIZE, 0, 0);
-                UpdateWindow(g_hwndMain);
-                InvalidateColumnIndicator();
-                UpdateWindow(g_hwndEdit);
-            }
+        HDC hdc = GetDC(g_hwndLineNum);
+        HFONT hOld = (HFONT)SelectObject(hdc, g_hFont);
+        SIZE sz;
+        TEXTMETRICW tm;
+        wchar_t numBuf[16];
+        int newWidth;
+
+        wsprintfW(numBuf, L"%d", logicalTotal);
+        GetTextExtentPoint32W(hdc, numBuf, lstrlenW(numBuf), &sz);
+        if (GetTextMetricsW(hdc, &tm)) lineHeight = tm.tmHeight;
+
+        newWidth = sz.cx + 10;
+        if (newWidth < 20) newWidth = 20;
+
+        SelectObject(hdc, hOld);
+        ReleaseDC(g_hwndLineNum, hdc);
+
+        if (newWidth != g_lineNumWidth) {
+            g_lineNumWidth = newWidth;
+            SendMessage(g_hwndMain, WM_SIZE, 0, 0);
+            UpdateWindow(g_hwndMain);
+            InvalidateColumnIndicator();
+            UpdateWindow(g_hwndEdit);
         }
     }
+
+    GetClientRect(g_hwndEdit, &rcEdit);
+    if (lineHeight > 0) {
+        visibleRows = (rcEdit.bottom - rcEdit.top) / lineHeight + 2;
+    } else {
+        visibleRows = 40;
+    }
+    if (visibleRows < 1) visibleRows = 1;
+
+    displayEnd = firstVisible + visibleRows;
+    if (displayEnd > visLines) displayEnd = visLines;
 
     /* Find logical line number at first visible line */
     charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, firstVisible, 0);
+    if (charIdx < 0) charIdx = 0;
     logicalLine = 1;
-    if (text) {
-        for (i = 0; i < charIdx && i < textLen; i++)
+    if (cachedLineStarts && cachedLineStartCount > 0) {
+        int lo = 0;
+        int hi = cachedLineStartCount;
+        while (lo < hi) {
+            int mid = lo + ((hi - lo) >> 1);
+            if (cachedLineStarts[mid] <= charIdx) lo = mid + 1;
+            else hi = mid;
+        }
+        logicalLine = lo;
+        if (logicalLine < 1) logicalLine = 1;
+    } else if (text) {
+        for (i = 0; i < charIdx && i < textLen; i++) {
             if (text[i] == '\n') logicalLine++;
+        }
     }
 
     /* Build line number text - blank for wrapped continuations */
-    for (i = firstVisible; i < visLines && pos < 4000; i++) {
+    for (i = firstVisible; i < displayEnd && pos < 4000; i++) {
+        int isLogicalStart = 1;
+
         charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, i, 0);
-        if (i == 0 || (text && charIdx > 0 && text[charIdx - 1] == '\n')) {
+        if (charIdx < 0) charIdx = 0;
+
+        if (i != 0) {
+            if (cachedLineStarts && cachedLineStartCount > 0) {
+                int lo = 0;
+                int hi = cachedLineStartCount - 1;
+                isLogicalStart = 0;
+
+                while (lo <= hi) {
+                    int mid = lo + ((hi - lo) >> 1);
+                    if (cachedLineStarts[mid] == charIdx) {
+                        isLogicalStart = 1;
+                        break;
+                    }
+                    if (cachedLineStarts[mid] < charIdx) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+            } else if (text) {
+                isLogicalStart = (charIdx > 0 && charIdx <= textLen && text[charIdx - 1] == '\n');
+            }
+        }
+
+        if (isLogicalStart) {
             pos += wsprintfW(buf + pos, L"%d\r\n", logicalLine);
             logicalLine++;
         } else {
@@ -2076,12 +2226,14 @@ static void OpenRecentFile(int index)
  */
 static void UpdateStatus(void)
 {
-    static DWORD s_lastSel = (DWORD)-1;
+    static DWORD s_lastSelStart = (DWORD)-1;
     static int s_lastLines = -1;
     static int s_lastChars = -1;
-    DWORD sel;
-    int line, col, totalLines, totalChars;
+    static DWORD s_nextTotalsTick = 0;
+    DWORD selStart, selEnd;
+    int line, col;
     int lineStart;
+    DWORD nowTick;
     wchar_t buf[64];
 
     /* If there's a status message, show it once then let it persist */
@@ -2090,28 +2242,36 @@ static void UpdateStatus(void)
         return;
     }
 
-    sel = (DWORD)SendMessageW(g_hwndEdit, EM_GETSEL, 0, 0);
-    totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
-    totalChars = GetWindowTextLengthW(g_hwndEdit);
+    SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
 
     /* Update left part if cursor moved */
-    if (sel != s_lastSel) {
-        s_lastSel = sel;
-        line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, LOWORD(sel), 0);
+    if (selStart != s_lastSelStart) {
+        s_lastSelStart = selStart;
+        line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
         lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, line, 0);
-        col = LOWORD(sel) - lineStart;
+        if (lineStart < 0) lineStart = 0;
+        col = (int)selStart - lineStart;
+        if (col < 0) col = 0;
         wsprintfW(buf, L"Ln %d, Col %d", line + 1, col + 1);
         SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)buf);
     }
 
-    /* Update right part if totals changed */
-    if (totalLines != s_lastLines || totalChars != s_lastChars) {
-        s_lastLines = totalLines;
-        s_lastChars = totalChars;
-        wsprintfW(buf, L"%d line%s, %d char%s", 
-            totalLines, totalLines == 1 ? L"" : L"s",
-            totalChars, totalChars == 1 ? L"" : L"s");
-        SendMessageW(g_hwndStatus, SB_SETTEXTW, 1, (LPARAM)buf);
+    /* Throttle expensive totals on large documents. */
+    nowTick = GetTickCount();
+    if (s_nextTotalsTick == 0 || (LONG)(nowTick - s_nextTotalsTick) >= 0) {
+        int totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+        int totalChars = GetWindowTextLengthW(g_hwndEdit);
+
+        s_nextTotalsTick = nowTick + STATUS_TOTALS_INTERVAL_MS;
+
+        if (totalLines != s_lastLines || totalChars != s_lastChars) {
+            s_lastLines = totalLines;
+            s_lastChars = totalChars;
+            wsprintfW(buf, L"%d line%s, %d char%s",
+                totalLines, totalLines == 1 ? L"" : L"s",
+                totalChars, totalChars == 1 ? L"" : L"s");
+            SendMessageW(g_hwndStatus, SB_SETTEXTW, 1, (LPARAM)buf);
+        }
     }
 }
 
@@ -2576,6 +2736,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 L"EDIT", NULL, editStyle,
                 0, 0, 0, 0,
                 hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
+            SendMessageW(g_hwndEdit, EM_LIMITTEXT, (WPARAM)EDIT_TEXT_LIMIT, 0);
             SendMessage(g_hwndEdit, EM_SETMARGINS, EC_LEFTMARGIN, MAKELONG(2, 0));
 
             SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -2709,9 +2870,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_EDIT_CUTLINE:
             {
                 int line, lineStart, lineEnd, len;
-                DWORD sel;
-                SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&sel, 0);
-                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, sel, 0);
+                DWORD selStart, selEnd;
+                SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
                 lineStart = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line, 0);
                 lineEnd = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line + 1, 0);
                 len = GetWindowTextLengthW(g_hwndEdit);
@@ -2815,6 +2976,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
                 g_hwndEdit = CreateWindowW(L"EDIT", NULL, editStyle,
                     0, 0, 0, 0, hwnd, (HMENU)ID_EDIT, g_hInst, NULL);
+                SendMessageW(g_hwndEdit, EM_LIMITTEXT, (WPARAM)EDIT_TEXT_LIMIT, 0);
                 SendMessage(g_hwndEdit, EM_SETMARGINS, EC_LEFTMARGIN, MAKELONG(2, 0));
                 SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
                 g_pfnEditProc = (WNDPROC)SetWindowLong(g_hwndEdit, GWL_WNDPROC,
