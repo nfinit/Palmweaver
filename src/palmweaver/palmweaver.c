@@ -51,6 +51,14 @@ int g_bThemedSelection = 0; /* Theme selection highlight colors (opt-in) */
 int g_bShowScrollbars = 1;  /* Scrollbars on by default */
 int g_bHideTaskbar = 0;     /* Hide taskbar in fullscreen (off by default) */
 static int g_lineNumWidth = 20;
+static UINT g_lineNumDirtyFlags = 0;
+static int g_lineNumTimerActive = 0;
+
+#define LINENUM_TIMER_ID         0x4C4E  /* 'LN' */
+#define LINENUM_TIMER_DELAY_MS   60
+#define LINENUM_DIRTY_TEXT       0x01
+#define LINENUM_DIRTY_SCROLL     0x02
+#define LINENUM_DIRTY_LAYOUT     0x04
 
 /* Theme colors: {foreground, background} */
 static COLORREF g_themes[][2] = {
@@ -131,6 +139,7 @@ static void DoInsertRule(void);
 static void DoQuickNote(void);
 static void DoReflow(void);
 static void UpdateLineNumbers(void);
+static void RequestLineNumberRefresh(UINT flags, int immediate);
 static void AddRecentFile(const wchar_t *path);
 static void UpdateRecentMenu(void);
 static void OpenRecentFile(int index);
@@ -530,7 +539,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     /* Sync line numbers on scroll */
     if (msg == WM_VSCROLL) {
         LRESULT r = CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
-        UpdateLineNumbers();
+        RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
         if (g_bShowColumnIndicator) InvalidateColumnIndicator();
         return r;
     }
@@ -545,7 +554,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (msg == WM_KEYUP || msg == WM_LBUTTONUP || msg == WM_CHAR) {
         ClearStatusMessage();
         UpdateStatus();
-        if (msg != WM_CHAR) UpdateLineNumbers();
+        if (msg != WM_CHAR) RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
     }
     
     return CallWindowProc(g_pfnEditProc, hwnd, msg, wParam, lParam);
@@ -1598,7 +1607,7 @@ static void UpdateFont(void)
         g_hFont = hNewFont;
         SendMessage(g_hwndEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         SendMessage(g_hwndLineNum, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-        UpdateLineNumbers();
+        RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
     }
 }
 
@@ -1833,6 +1842,39 @@ static LRESULT CALLBACK LineNumProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     return CallWindowProc(g_pfnLineNumProc, hwnd, msg, wParam, lParam);
 }
 
+static void RequestLineNumberRefresh(UINT flags, int immediate)
+{
+    g_lineNumDirtyFlags |= flags;
+
+    if (!g_bShowLineNums) {
+        if (g_lineNumTimerActive && g_hwndMain) {
+            KillTimer(g_hwndMain, LINENUM_TIMER_ID);
+            g_lineNumTimerActive = 0;
+        }
+        g_lineNumDirtyFlags = 0;
+        return;
+    }
+
+    if (immediate || !g_hwndMain) {
+        if (g_lineNumTimerActive && g_hwndMain) {
+            KillTimer(g_hwndMain, LINENUM_TIMER_ID);
+            g_lineNumTimerActive = 0;
+        }
+        g_lineNumDirtyFlags = 0;
+        UpdateLineNumbers();
+        return;
+    }
+
+    if (!g_lineNumTimerActive) {
+        if (SetTimer(g_hwndMain, LINENUM_TIMER_ID, LINENUM_TIMER_DELAY_MS, NULL)) {
+            g_lineNumTimerActive = 1;
+        } else {
+            g_lineNumDirtyFlags = 0;
+            UpdateLineNumbers();
+        }
+    }
+}
+
 static void UpdateLineNumbers(void)
 {
     static wchar_t *cachedText = NULL;
@@ -2025,7 +2067,7 @@ static void OpenRecentFile(int index)
     lstrcpyW(g_szFilePath, path);
     g_bDirty = 0;
     UpdateTitle();
-    UpdateLineNumbers();
+    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     AddRecentFile(path);
 }
 
@@ -2179,7 +2221,7 @@ static void DoFileNew(void)
     g_bDirty = 0;
     Undo_Clear();
     UpdateTitle();
-    UpdateLineNumbers();
+    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
 }
 
 /*
@@ -2248,7 +2290,7 @@ static int DoFileOpen(void)
     g_bDirty = 0;
     Undo_Clear();
     UpdateTitle();
-    UpdateLineNumbers();
+    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     AddRecentFile(szFile);
     return 1;
 }
@@ -2548,7 +2590,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetFocus(g_hwndEdit);
             UpdateTitle();
             UpdateStatus();
-            UpdateLineNumbers();
+            RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
         }
         return 0;
 
@@ -2789,7 +2831,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
 
                 SendMessage(hwnd, WM_SIZE, 0, 0);
-                UpdateLineNumbers();
+                RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
                 SetFocus(g_hwndEdit);
             }
             return 0;
@@ -2800,7 +2842,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_bShowLineNums ? MF_CHECKED : MF_UNCHECKED);
             ShowWindow(g_hwndLineNum, g_bShowLineNums ? SW_SHOW : SW_HIDE);
             SendMessage(hwnd, WM_SIZE, 0, 0);
-            if (g_bShowLineNums) UpdateLineNumbers();
+            if (g_bShowLineNums) RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
             SetFocus(g_hwndEdit);
             return 0;
 
@@ -2900,8 +2942,20 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     UpdateTitle();
                 }
                 UpdateStatus();
-                UpdateLineNumbers();
+                RequestLineNumberRefresh(LINENUM_DIRTY_TEXT, 0);
                 if (g_bShowColumnIndicator) InvalidateColumnIndicator();
+            }
+            return 0;
+        }
+        break;
+
+    case WM_TIMER:
+        if (wParam == LINENUM_TIMER_ID) {
+            KillTimer(hwnd, LINENUM_TIMER_ID);
+            g_lineNumTimerActive = 0;
+            if (g_lineNumDirtyFlags) {
+                g_lineNumDirtyFlags = 0;
+                UpdateLineNumbers();
             }
             return 0;
         }
@@ -2919,6 +2973,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+        if (g_lineNumTimerActive) {
+            KillTimer(hwnd, LINENUM_TIMER_ID);
+            g_lineNumTimerActive = 0;
+        }
         /* Restore taskbar if hidden */
         if (g_bFullScreen && g_bHideTaskbar) {
             HWND hwndTaskbar = FindWindowW(L"HHTaskBar", NULL);
