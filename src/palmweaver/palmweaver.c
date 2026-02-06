@@ -83,6 +83,9 @@ static int g_bMousePresent = 1;
 #define EDIT_TEXT_LIMIT          0x7FFFFFFE
 #define STATUS_TOTALS_INTERVAL_MS 350
 #define BUSY_TEXT_THRESHOLD      65535
+#define PAGED_MODE_THRESHOLD_CHARS 60000
+#define PAGED_WINDOW_CHARS        49152
+#define PAGED_EDGE_CHARS          4096
 
 /* Theme colors: {foreground, background} */
 static COLORREF g_themes[][2] = {
@@ -126,6 +129,15 @@ static WNDPROC g_pfnLineNumProc = NULL;
 static int g_bReplaceTypingGroupOpen = 0;
 static int g_bVScrollThumbTrackActive = 0;
 static int g_bPostJumpRepaintPending = 0;
+static int g_bPagedMode = 0;
+static int g_bPagedLoading = 0;
+static int g_bPagedPageDirty = 0;
+static wchar_t *g_pagedText = NULL;
+static int g_pagedTextLen = 0;
+static int g_pagedPageStart = 0;
+static int g_pagedPageLen = 0;
+static int *g_pagedLineStarts = NULL;
+static int g_pagedLineCount = 1;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -162,6 +174,15 @@ static void UpdateTheme(void);
 static void ApplySelectionColors(void);
 static void RestoreSelectionColors(void);
 static void QueueEditRepaintAfterJump(void);
+static void PagedReset(void);
+static int PagedRebuildLineStarts(void);
+static int PagedCommitPage(void);
+static int PagedLoadWindowAt(int globalPos);
+static int PagedEnableWithText(wchar_t *text, int len);
+static int PagedGetGlobalSelStart(void);
+static void PagedIndexToLineCol(int index, int *outLine, int *outCol);
+static void PagedMaybeShiftWindowByCaret(void);
+static void PagedHandleVScrollEdge(UINT scrollCode);
 static void DoFileNew(void);
 static int DoFileOpen(void);
 static int DoFileSave(void);
@@ -222,6 +243,269 @@ static void EndBusyCursor(const wchar_t *tag)
     (void)tag;
     g_busyDepth--;
     if (g_hwndStatus) UpdateStatus();
+}
+
+static void PagedReset(void)
+{
+    if (g_pagedText) {
+        LocalFree(g_pagedText);
+        g_pagedText = NULL;
+    }
+    if (g_pagedLineStarts) {
+        LocalFree(g_pagedLineStarts);
+        g_pagedLineStarts = NULL;
+    }
+    g_bPagedMode = 0;
+    g_bPagedLoading = 0;
+    g_bPagedPageDirty = 0;
+    g_pagedTextLen = 0;
+    g_pagedPageStart = 0;
+    g_pagedPageLen = 0;
+    g_pagedLineCount = 1;
+}
+
+static int PagedRebuildLineStarts(void)
+{
+    int i, count = 1, idx = 1;
+    int *starts;
+
+    if (!g_pagedText || g_pagedTextLen < 0) return 0;
+
+    for (i = 0; i < g_pagedTextLen; i++) {
+        if (g_pagedText[i] == L'\n') count++;
+    }
+
+    starts = (int *)LocalAlloc(LMEM_FIXED, count * sizeof(int));
+    if (!starts) return 0;
+    starts[0] = 0;
+
+    for (i = 0; i < g_pagedTextLen && idx < count; i++) {
+        if (g_pagedText[i] == L'\n') starts[idx++] = i + 1;
+    }
+    count = idx;
+
+    if (g_pagedLineStarts) LocalFree(g_pagedLineStarts);
+    g_pagedLineStarts = starts;
+    g_pagedLineCount = count > 0 ? count : 1;
+    return 1;
+}
+
+static int PagedCommitPage(void)
+{
+    int curLen;
+    wchar_t *curText;
+    int oldLen, newLen, suffixStart, suffixLen, i;
+    wchar_t *newDoc;
+
+    if (!g_bPagedMode || !g_bPagedPageDirty) return 1;
+    if (!g_hwndEdit) return 0;
+
+    curLen = GetWindowTextLengthW(g_hwndEdit);
+    curText = (wchar_t *)LocalAlloc(LMEM_FIXED, (curLen + 1) * sizeof(wchar_t));
+    if (!curText) return 0;
+    GetWindowTextW(g_hwndEdit, curText, curLen + 1);
+
+    oldLen = g_pagedPageLen;
+    newLen = g_pagedTextLen - oldLen + curLen;
+    if (newLen < 0) {
+        LocalFree(curText);
+        return 0;
+    }
+
+    newDoc = (wchar_t *)LocalAlloc(LMEM_FIXED, (newLen + 1) * sizeof(wchar_t));
+    if (!newDoc) {
+        LocalFree(curText);
+        return 0;
+    }
+
+    for (i = 0; i < g_pagedPageStart; i++) newDoc[i] = g_pagedText[i];
+    for (i = 0; i < curLen; i++) newDoc[g_pagedPageStart + i] = curText[i];
+
+    suffixStart = g_pagedPageStart + oldLen;
+    suffixLen = g_pagedTextLen - suffixStart;
+    if (suffixLen < 0) suffixLen = 0;
+    for (i = 0; i < suffixLen; i++) {
+        newDoc[g_pagedPageStart + curLen + i] = g_pagedText[suffixStart + i];
+    }
+    newDoc[newLen] = 0;
+
+    LocalFree(g_pagedText);
+    LocalFree(curText);
+    g_pagedText = newDoc;
+    g_pagedTextLen = newLen;
+    g_pagedPageLen = curLen;
+    g_bPagedPageDirty = 0;
+
+    PagedRebuildLineStarts();
+    return 1;
+}
+
+static int PagedLoadWindowAt(int globalPos)
+{
+    int start, end, maxStart, pageLen, localPos, i;
+    wchar_t *pageText;
+
+    if (!g_bPagedMode || !g_pagedText || !g_hwndEdit) return 0;
+
+    if (!PagedCommitPage()) return 0;
+
+    if (globalPos < 0) globalPos = 0;
+    if (globalPos > g_pagedTextLen) globalPos = g_pagedTextLen;
+
+    maxStart = g_pagedTextLen - PAGED_WINDOW_CHARS;
+    if (maxStart < 0) maxStart = 0;
+
+    start = globalPos - (PAGED_WINDOW_CHARS / 3);
+    if (start < 0) start = 0;
+    if (start > maxStart) start = maxStart;
+
+    end = start + PAGED_WINDOW_CHARS;
+    if (end > g_pagedTextLen) end = g_pagedTextLen;
+    pageLen = end - start;
+    if (pageLen < 0) pageLen = 0;
+
+    pageText = (wchar_t *)LocalAlloc(LMEM_FIXED, (pageLen + 1) * sizeof(wchar_t));
+    if (!pageText) return 0;
+    for (i = 0; i < pageLen; i++) pageText[i] = g_pagedText[start + i];
+    pageText[pageLen] = 0;
+
+    g_bPagedLoading = 1;
+    SetWindowTextW(g_hwndEdit, pageText);
+    g_bPagedLoading = 0;
+
+    g_pagedPageStart = start;
+    g_pagedPageLen = pageLen;
+    g_bPagedPageDirty = 0;
+
+    localPos = globalPos - start;
+    if (localPos < 0) localPos = 0;
+    if (localPos > pageLen) localPos = pageLen;
+    SendMessageW(g_hwndEdit, EM_SETSEL, localPos, localPos);
+    SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+    Undo_Clear();
+    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
+    UpdateStatus();
+
+    LocalFree(pageText);
+    return 1;
+}
+
+static int PagedEnableWithText(wchar_t *text, int len)
+{
+    if (!text || len < 0) return 0;
+
+    PagedReset();
+    g_bPagedMode = 1;
+    g_pagedText = text;
+    g_pagedTextLen = len;
+    g_pagedPageStart = 0;
+    g_pagedPageLen = 0;
+    g_bPagedPageDirty = 0;
+
+    if (!PagedRebuildLineStarts()) {
+        PagedReset();
+        return 0;
+    }
+
+    if (!PagedLoadWindowAt(0)) {
+        PagedReset();
+        return 0;
+    }
+
+    SetStatusMessage(L"Large file mode active");
+    return 1;
+}
+
+static int PagedGetGlobalSelStart(void)
+{
+    DWORD selStart, selEnd;
+    (void)selEnd;
+
+    if (!g_bPagedMode || !g_hwndEdit) return 0;
+    SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    return g_pagedPageStart + (int)selStart;
+}
+
+static void PagedIndexToLineCol(int index, int *outLine, int *outCol)
+{
+    int lo, hi;
+    int line = 1;
+    int col = 1;
+
+    if (!outLine || !outCol) return;
+
+    if (!g_bPagedMode || !g_pagedLineStarts || g_pagedLineCount <= 0) {
+        *outLine = 1;
+        *outCol = 1;
+        return;
+    }
+
+    if (index < 0) index = 0;
+    if (index > g_pagedTextLen) index = g_pagedTextLen;
+
+    lo = 0;
+    hi = g_pagedLineCount;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) >> 1);
+        if (g_pagedLineStarts[mid] <= index) lo = mid + 1;
+        else hi = mid;
+    }
+
+    line = lo;
+    if (line < 1) line = 1;
+    if (line > g_pagedLineCount) line = g_pagedLineCount;
+    col = index - g_pagedLineStarts[line - 1] + 1;
+    if (col < 1) col = 1;
+
+    *outLine = line;
+    *outCol = col;
+}
+
+static void PagedMaybeShiftWindowByCaret(void)
+{
+    DWORD selStart, selEnd;
+    int globalSel;
+
+    if (!g_bPagedMode || g_bPagedLoading || !g_hwndEdit) return;
+    if (g_pagedTextLen <= PAGED_WINDOW_CHARS) return;
+
+    SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    (void)selEnd;
+    globalSel = g_pagedPageStart + (int)selStart;
+
+    if ((int)selStart >= g_pagedPageLen - PAGED_EDGE_CHARS && g_pagedPageStart + g_pagedPageLen < g_pagedTextLen) {
+        int target = globalSel + PAGED_EDGE_CHARS;
+        if (target > g_pagedTextLen) target = g_pagedTextLen;
+        PagedLoadWindowAt(target);
+    } else if ((int)selStart <= PAGED_EDGE_CHARS && g_pagedPageStart > 0) {
+        int target = globalSel - PAGED_EDGE_CHARS;
+        if (target < 0) target = 0;
+        PagedLoadWindowAt(target);
+    }
+}
+
+static void PagedHandleVScrollEdge(UINT scrollCode)
+{
+    int firstVisible, lineCount;
+
+    if (!g_bPagedMode || g_bPagedLoading || !g_hwndEdit) return;
+
+    firstVisible = (int)SendMessageW(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    lineCount = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+
+    if ((scrollCode == SB_LINEDOWN || scrollCode == SB_PAGEDOWN || scrollCode == SB_BOTTOM ||
+         scrollCode == SB_THUMBPOSITION || scrollCode == SB_ENDSCROLL) &&
+        firstVisible >= lineCount - 2 && g_pagedPageStart + g_pagedPageLen < g_pagedTextLen) {
+        int target = g_pagedPageStart + g_pagedPageLen - (PAGED_EDGE_CHARS / 2);
+        if (target < 0) target = 0;
+        PagedLoadWindowAt(target);
+    } else if ((scrollCode == SB_LINEUP || scrollCode == SB_PAGEUP || scrollCode == SB_TOP ||
+                scrollCode == SB_THUMBPOSITION || scrollCode == SB_ENDSCROLL) &&
+               firstVisible <= 1 && g_pagedPageStart > 0) {
+        int target = g_pagedPageStart - (PAGED_WINDOW_CHARS / 2);
+        if (target < 0) target = 0;
+        PagedLoadWindowAt(target);
+    }
 }
 
 static int CaptureEditRangeTextFull(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen)
@@ -837,6 +1121,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
         }
 
+        PagedHandleVScrollEdge(scrollCode);
         if (g_bShowColumnIndicator) InvalidateColumnIndicator();
         return r;
     }
@@ -853,6 +1138,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     }
 
     if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
+        if (g_bPagedMode) PagedMaybeShiftWindowByCaret();
         ClearStatusMessage();
         UpdateStatus();
         RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
@@ -1150,6 +1436,21 @@ static void GotoLineNumber(int lineNum)
 
     if (lineNum < 1) lineNum = 1;
 
+    if (g_bPagedMode && g_pagedText && g_pagedLineStarts) {
+        if (lineNum > g_pagedLineCount) lineNum = g_pagedLineCount;
+        charIdx = g_pagedLineStarts[lineNum - 1];
+        if (PagedLoadWindowAt(charIdx)) {
+            int localIdx = charIdx - g_pagedPageStart;
+            if (localIdx < 0) localIdx = 0;
+            if (localIdx > g_pagedPageLen) localIdx = g_pagedPageLen;
+            SendMessageW(g_hwndEdit, EM_SETSEL, localIdx, localIdx);
+            SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+            SetFocus(g_hwndEdit);
+            UpdateStatus();
+        }
+        return;
+    }
+
     textLen = GetWindowTextLengthW(g_hwndEdit);
     if (textLen == 0) {
         SendMessage(g_hwndEdit, EM_SETSEL, 0, 0);
@@ -1296,18 +1597,28 @@ static void QueueEditRepaintAfterJump(void)
 static void DoFindNext(void)
 {
     int len, findLen, start, i, j, k;
-    int canSelectRange;
+    int canSelectRange, usePaged;
     int busy = 0;
-    wchar_t *buf;
+    wchar_t *buf = NULL;
     wchar_t msg[96];
     DWORD selStart, selEnd;
     int line, col;
+    int foundAt = -1;
+    int wrapped = 0;
 
     if (!g_findText[0]) return;
 
     findLen = lstrlenW(g_findText);
-    len = GetWindowTextLengthW(g_hwndEdit);
-    canSelectRange = (len <= 65535);
+    usePaged = (g_bPagedMode && g_pagedText != NULL);
+    if (usePaged) {
+        if (!PagedCommitPage()) return;
+        len = g_pagedTextLen;
+        canSelectRange = 1;
+        buf = g_pagedText;
+    } else {
+        len = GetWindowTextLengthW(g_hwndEdit);
+        canSelectRange = (len <= 65535);
+    }
     if (len == 0) return;
 
     if (len > BUSY_TEXT_THRESHOLD) {
@@ -1316,18 +1627,21 @@ static void DoFindNext(void)
         busy = 1;
     }
 
-    buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    if (!buf) {
-        if (busy) {
-            EndBusyCursor(L"find");
-            ClearStatusMessage();
+    if (!usePaged) {
+        buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+        if (!buf) {
+            if (busy) {
+                EndBusyCursor(L"find");
+                ClearStatusMessage();
+            }
+            return;
         }
-        return;
+        GetWindowTextW(g_hwndEdit, buf, len + 1);
     }
-    GetWindowTextW(g_hwndEdit, buf, len + 1);
 
     SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-    start = (int)selStart + 1;
+    if (usePaged) start = PagedGetGlobalSelStart() + 1;
+    else start = (int)selStart + 1;
     if (start > len) start = 0;
 
     /* Search forward with wrap */
@@ -1336,66 +1650,66 @@ static void DoFindNext(void)
             if (!CharsMatch(buf[i + j], g_findText[j])) break;
         }
         if (j == findLen) {
-            if (canSelectRange) {
-                SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
-                SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-                RefreshEditAfterLargeJump();
-                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
-                col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
-                wsprintfW(msg, L"Found at Ln %d, Col %d", line, col);
-            } else {
-                line = 1;
-                col = 1;
-                for (k = 0; k < i; k++) {
-                    if (buf[k] == L'\n') {
-                        line++;
-                        col = 1;
-                    } else {
-                        col++;
-                    }
-                }
-                wsprintfW(msg, L"Found at Ln %d, Col %d (no jump: large file)", line, col);
-            }
-            SetStatusMessage(msg);
-            LocalFree(buf);
-            if (busy) EndBusyCursor(L"find");
-            return;
+            foundAt = i;
+            wrapped = 0;
+            break;
         }
     }
-    for (i = 0; i < start && i <= len - findLen; i++) {
-        for (j = 0; j < findLen; j++) {
-            if (!CharsMatch(buf[i + j], g_findText[j])) break;
-        }
-        if (j == findLen) {
-            if (canSelectRange) {
-                SendMessage(g_hwndEdit, EM_SETSEL, i, i + findLen);
-                SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
-                RefreshEditAfterLargeJump();
-                line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, i, 0) + 1;
-                col = i - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
-                wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped)", line, col);
-            } else {
-                line = 1;
-                col = 1;
-                for (k = 0; k < i; k++) {
-                    if (buf[k] == L'\n') {
-                        line++;
-                        col = 1;
-                    } else {
-                        col++;
-                    }
-                }
-                wsprintfW(msg, L"Found at Ln %d, Col %d (wrapped, no jump: large file)", line, col);
+
+    if (foundAt < 0) {
+        for (i = 0; i < start && i <= len - findLen; i++) {
+            for (j = 0; j < findLen; j++) {
+                if (!CharsMatch(buf[i + j], g_findText[j])) break;
             }
-            SetStatusMessage(msg);
-            LocalFree(buf);
-            if (busy) EndBusyCursor(L"find");
-            return;
+            if (j == findLen) {
+                foundAt = i;
+                wrapped = 1;
+                break;
+            }
         }
     }
-    LocalFree(buf);
+
+    if (foundAt >= 0) {
+        if (usePaged) {
+            if (PagedLoadWindowAt(foundAt)) {
+                int localStart = foundAt - g_pagedPageStart;
+                int localEnd = localStart + findLen;
+                if (localStart < 0) localStart = 0;
+                if (localEnd > g_pagedPageLen) localEnd = g_pagedPageLen;
+                SendMessageW(g_hwndEdit, EM_SETSEL, localStart, localEnd);
+                SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+                RefreshEditAfterLargeJump();
+            }
+            PagedIndexToLineCol(foundAt, &line, &col);
+            wsprintfW(msg, wrapped ? L"Found at Ln %d, Col %d (wrapped)" : L"Found at Ln %d, Col %d", line, col);
+        } else if (canSelectRange) {
+            SendMessage(g_hwndEdit, EM_SETSEL, foundAt, foundAt + findLen);
+            SendMessage(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+            RefreshEditAfterLargeJump();
+            line = (int)SendMessage(g_hwndEdit, EM_LINEFROMCHAR, foundAt, 0) + 1;
+            col = foundAt - (int)SendMessage(g_hwndEdit, EM_LINEINDEX, line - 1, 0) + 1;
+            wsprintfW(msg, wrapped ? L"Found at Ln %d, Col %d (wrapped)" : L"Found at Ln %d, Col %d", line, col);
+        } else {
+            line = 1;
+            col = 1;
+            for (k = 0; k < foundAt; k++) {
+                if (buf[k] == L'\n') {
+                    line++;
+                    col = 1;
+                } else {
+                    col++;
+                }
+            }
+            wsprintfW(msg, wrapped ? L"Found at Ln %d, Col %d (wrapped, no jump: large file)"
+                                   : L"Found at Ln %d, Col %d (no jump: large file)", line, col);
+        }
+        SetStatusMessage(msg);
+    } else {
+        SetStatusMessage(L"Text not found");
+    }
+
+    if (!usePaged && buf) LocalFree(buf);
     if (busy) EndBusyCursor(L"find");
-    SetStatusMessage(L"Text not found");
 }
 
 static LRESULT CALLBACK FindEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1502,6 +1816,10 @@ static void DoReplaceOne(void)
     int len, replLine, replCol, nextLine, nextCol;
 
     if (!g_findText[0]) return;
+    if (g_bPagedMode) {
+        SetStatusMessage(L"Replace is not available in large file mode");
+        return;
+    }
 
     findLen = lstrlenW(g_findText);
     SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
@@ -1562,6 +1880,10 @@ static int DoReplaceAll(void)
     wchar_t *buf, *newBuf, *p;
 
     if (!g_findText[0]) return 0;
+    if (g_bPagedMode) {
+        SetStatusMessage(L"Replace All is not available in large file mode");
+        return 0;
+    }
 
     findLen = lstrlenW(g_findText);
     replLen = lstrlenW(g_replaceText);
@@ -2337,6 +2659,107 @@ static void UpdateLineNumbers(void)
         visLines == cachedVisLines)
         return;
 
+    if (g_bPagedMode && g_pagedLineStarts && g_pagedLineCount > 0) {
+        int globalIdx;
+
+        if (cachedText) { LocalFree(cachedText); cachedText = NULL; }
+        if (cachedLineStarts) { LocalFree(cachedLineStarts); cachedLineStarts = NULL; }
+        cachedLineStartCount = 1;
+        cachedLen = textLen;
+        cachedFirstVisible = firstVisible;
+        cachedVisLines = visLines;
+        cachedTextSeq = g_lineNumTextSeq;
+        logicalTotal = g_pagedLineCount;
+
+        /* Auto-size gutter width based on global line count in paged mode. */
+        {
+            HDC hdc = GetDC(g_hwndLineNum);
+            HFONT hOld = (HFONT)SelectObject(hdc, g_hFont);
+            SIZE sz;
+            TEXTMETRICW tm;
+            wchar_t numBuf[16];
+            int newWidth;
+
+            wsprintfW(numBuf, L"%d", logicalTotal);
+            GetTextExtentPoint32W(hdc, numBuf, lstrlenW(numBuf), &sz);
+            if (GetTextMetricsW(hdc, &tm)) lineHeight = tm.tmHeight;
+
+            newWidth = sz.cx + 10;
+            if (newWidth < 20) newWidth = 20;
+
+            SelectObject(hdc, hOld);
+            ReleaseDC(g_hwndLineNum, hdc);
+
+            if (newWidth != g_lineNumWidth) {
+                g_lineNumWidth = newWidth;
+                SendMessage(g_hwndMain, WM_SIZE, 0, 0);
+                InvalidateRect(g_hwndLineNum, NULL, FALSE);
+                InvalidateRect(g_hwndEdit, NULL, FALSE);
+                InvalidateColumnIndicator();
+            }
+        }
+
+        GetClientRect(g_hwndEdit, &rcEdit);
+        if (lineHeight > 0) visibleRows = (rcEdit.bottom - rcEdit.top) / lineHeight + 2;
+        else visibleRows = 40;
+        if (visibleRows < 1) visibleRows = 1;
+
+        displayEnd = firstVisible + visibleRows;
+        if (displayEnd > visLines) displayEnd = visLines;
+
+        charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, firstVisible, 0);
+        if (charIdx < 0) charIdx = 0;
+        globalIdx = g_pagedPageStart + charIdx;
+        logicalLine = 1;
+        {
+            int lo = 0;
+            int hi = g_pagedLineCount;
+            while (lo < hi) {
+                int mid = lo + ((hi - lo) >> 1);
+                if (g_pagedLineStarts[mid] <= globalIdx) lo = mid + 1;
+                else hi = mid;
+            }
+            logicalLine = lo;
+            if (logicalLine < 1) logicalLine = 1;
+        }
+
+        for (i = firstVisible; i < displayEnd && pos < 4000; i++) {
+            int isLogicalStart = 0;
+
+            charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, i, 0);
+            if (charIdx < 0) charIdx = 0;
+            globalIdx = g_pagedPageStart + charIdx;
+
+            {
+                int lo = 0;
+                int hi = g_pagedLineCount - 1;
+                while (lo <= hi) {
+                    int mid = lo + ((hi - lo) >> 1);
+                    if (g_pagedLineStarts[mid] == globalIdx) {
+                        isLogicalStart = 1;
+                        break;
+                    }
+                    if (g_pagedLineStarts[mid] < globalIdx) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+            }
+
+            if (isLogicalStart) {
+                pos += wsprintfW(buf + pos, L"%d\r\n", logicalLine);
+                logicalLine++;
+            } else {
+                pos += wsprintfW(buf + pos, L"\r\n");
+            }
+        }
+        buf[pos] = 0;
+
+        if (lstrcmpW(buf, cachedOutput) != 0) {
+            lstrcpyW(cachedOutput, buf);
+            SetWindowTextW(g_hwndLineNum, buf);
+        }
+        return;
+    }
+
     /* Refresh cached text and logical line starts when content changes. */
     if (textChanged || textLen != cachedLen || (textLen > 0 && !cachedText && !cachedLineStarts)) {
         int newlineCount = 0;
@@ -2541,8 +2964,9 @@ static void OpenRecentFile(int index)
     HANDLE hFile;
     DWORD dwSize, dwRead;
     char *pBuf;
-    wchar_t *pWBuf;
+    wchar_t *pWBuf = NULL;
     int i;
+    int textLen = 0;
     int busy = 0;
 
     if (index < 0 || index >= g_recentCount) return;
@@ -2578,24 +3002,54 @@ static void OpenRecentFile(int index)
     pBuf[dwRead] = 0;
 
     if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
-        wchar_t *pWide = (wchar_t *)(pBuf + 2);
         int nChars = (dwRead - 2) / sizeof(wchar_t);
-        pWide[nChars] = 0;
-        SetWindowTextW(g_hwndEdit, pWide);
+        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (nChars + 1) * sizeof(wchar_t));
+        if (pWBuf) {
+            wchar_t *pWide = (wchar_t *)(pBuf + 2);
+            for (i = 0; i < nChars; i++) pWBuf[i] = pWide[i];
+            pWBuf[nChars] = 0;
+            textLen = nChars;
+        }
     } else {
         pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwRead + 1) * sizeof(wchar_t));
         if (pWBuf) {
             for (i = 0; i < (int)dwRead; i++)
                 pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
             pWBuf[dwRead] = 0;
-            SetWindowTextW(g_hwndEdit, pWBuf);
-            LocalFree(pWBuf);
+            textLen = (int)dwRead;
         }
     }
 
     LocalFree(pBuf);
+
+    if (!pWBuf) {
+        if (busy) {
+            EndBusyCursor(L"openrecent");
+            ClearStatusMessage();
+        }
+        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    if (textLen > PAGED_MODE_THRESHOLD_CHARS) {
+        if (!PagedEnableWithText(pWBuf, textLen)) {
+            LocalFree(pWBuf);
+            if (busy) {
+                EndBusyCursor(L"openrecent");
+                ClearStatusMessage();
+            }
+            MessageBoxW(g_hwndMain, L"Cannot enable large file mode.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+    } else {
+        PagedReset();
+        SetWindowTextW(g_hwndEdit, pWBuf);
+        LocalFree(pWBuf);
+    }
+
     lstrcpyW(g_szFilePath, path);
     g_bDirty = 0;
+    Undo_Clear();
     UpdateTitle();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     AddRecentFile(path);
@@ -2615,6 +3069,7 @@ static void UpdateStatus(void)
     static int s_lastChars = -1;
     static DWORD s_nextTotalsTick = 0;
     DWORD selStart, selEnd;
+    DWORD selGlobal;
     int line, col;
     int lineStart;
     DWORD nowTick;
@@ -2635,24 +3090,39 @@ static void UpdateStatus(void)
     }
 
     SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    if (g_bPagedMode) selGlobal = (DWORD)(g_pagedPageStart + (int)selStart);
+    else selGlobal = selStart;
 
     /* Update left part if cursor moved */
-    if (selStart != s_lastSelStart) {
-        s_lastSelStart = selStart;
-        line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
-        lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, line, 0);
-        if (lineStart < 0) lineStart = 0;
-        col = (int)selStart - lineStart;
-        if (col < 0) col = 0;
-        wsprintfW(buf, L"Ln %d, Col %d", line + 1, col + 1);
+    if (selGlobal != s_lastSelStart) {
+        s_lastSelStart = selGlobal;
+        if (g_bPagedMode) {
+            PagedIndexToLineCol((int)selGlobal, &line, &col);
+            wsprintfW(buf, L"Ln %d, Col %d", line, col);
+        } else {
+            line = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, selStart, 0);
+            lineStart = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, line, 0);
+            if (lineStart < 0) lineStart = 0;
+            col = (int)selStart - lineStart;
+            if (col < 0) col = 0;
+            wsprintfW(buf, L"Ln %d, Col %d", line + 1, col + 1);
+        }
         SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)buf);
     }
 
     /* Throttle expensive totals on large documents. */
     nowTick = GetTickCount();
     if (s_nextTotalsTick == 0 || (LONG)(nowTick - s_nextTotalsTick) >= 0) {
-        int totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
-        int totalChars = GetWindowTextLengthW(g_hwndEdit);
+        int totalLines;
+        int totalChars;
+
+        if (g_bPagedMode) {
+            totalLines = g_pagedLineCount;
+            totalChars = g_pagedTextLen;
+        } else {
+            totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+            totalChars = GetWindowTextLengthW(g_hwndEdit);
+        }
 
         s_nextTotalsTick = nowTick + STATUS_TOTALS_INTERVAL_MS;
 
@@ -2771,6 +3241,7 @@ static void DoFileNew(void)
 {
     if (!PromptSave()) return;
 
+    PagedReset();
     SetWindowTextW(g_hwndEdit, L"");
     g_szFilePath[0] = 0;
     g_bDirty = 0;
@@ -2788,8 +3259,9 @@ static int DoFileOpen(void)
     HANDLE hFile;
     DWORD dwSize, dwRead;
     char *pBuf;
-    wchar_t *pWBuf;
+    wchar_t *pWBuf = NULL;
     int i;
+    int textLen = 0;
     int busy = 0;
 
     if (!PromptSave()) return 0;
@@ -2829,27 +3301,51 @@ static int DoFileOpen(void)
     CloseHandle(hFile);
     pBuf[dwRead] = 0;
 
-    /* Check for UTF-16 BOM */
+    /* Convert file bytes to Unicode text buffer */
     if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
-        /* UTF-16 LE - skip BOM, null-terminate */
-        wchar_t *pWide = (wchar_t *)(pBuf + 2);
         int nChars = (dwRead - 2) / sizeof(wchar_t);
-        pWide[nChars] = 0;
-        SetWindowTextW(g_hwndEdit, pWide);
+        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (nChars + 1) * sizeof(wchar_t));
+        if (pWBuf) {
+            wchar_t *pWide = (wchar_t *)(pBuf + 2);
+            for (i = 0; i < nChars; i++) pWBuf[i] = pWide[i];
+            pWBuf[nChars] = 0;
+            textLen = nChars;
+        }
     } else {
-        /* Assume ANSI - convert to Unicode */
         pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwRead + 1) * sizeof(wchar_t));
         if (pWBuf) {
-            for (i = 0; i < (int)dwRead; i++) {
-                pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
-            }
+            for (i = 0; i < (int)dwRead; i++) pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
             pWBuf[dwRead] = 0;
-            SetWindowTextW(g_hwndEdit, pWBuf);
-            LocalFree(pWBuf);
+            textLen = (int)dwRead;
         }
     }
 
     LocalFree(pBuf);
+
+    if (!pWBuf) {
+        if (busy) {
+            EndBusyCursor(L"open");
+            ClearStatusMessage();
+        }
+        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    if (textLen > PAGED_MODE_THRESHOLD_CHARS) {
+        if (!PagedEnableWithText(pWBuf, textLen)) {
+            LocalFree(pWBuf);
+            if (busy) {
+                EndBusyCursor(L"open");
+                ClearStatusMessage();
+            }
+            MessageBoxW(g_hwndMain, L"Cannot enable large file mode.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return 0;
+        }
+    } else {
+        PagedReset();
+        SetWindowTextW(g_hwndEdit, pWBuf);
+        LocalFree(pWBuf);
+    }
 
     lstrcpyW(g_szFilePath, szFile);
     g_bDirty = 0;
@@ -2871,7 +3367,7 @@ static int DoFileSave(void)
 {
     HANDLE hFile;
     DWORD dwLen, dwWritten;
-    wchar_t *pText;
+    wchar_t *pText = NULL;
     unsigned char bom[2] = {0xFF, 0xFE};
 
     if (!g_szFilePath[0]) {
@@ -2885,15 +3381,24 @@ static int DoFileSave(void)
         return 0;
     }
 
-    dwLen = GetWindowTextLengthW(g_hwndEdit);
-    pText = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwLen + 1) * sizeof(wchar_t));
-    if (!pText) {
-        CloseHandle(hFile);
-        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
-        return 0;
+    if (g_bPagedMode) {
+        if (!PagedCommitPage()) {
+            CloseHandle(hFile);
+            MessageBoxW(g_hwndMain, L"Cannot commit large-file page.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return 0;
+        }
+        dwLen = (DWORD)g_pagedTextLen;
+        pText = g_pagedText;
+    } else {
+        dwLen = GetWindowTextLengthW(g_hwndEdit);
+        pText = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwLen + 1) * sizeof(wchar_t));
+        if (!pText) {
+            CloseHandle(hFile);
+            MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return 0;
+        }
+        GetWindowTextW(g_hwndEdit, pText, dwLen + 1);
     }
-
-    GetWindowTextW(g_hwndEdit, pText, dwLen + 1);
 
     /* Write UTF-16 LE BOM */
     WriteFile(hFile, bom, 2, &dwWritten, NULL);
@@ -2901,7 +3406,7 @@ static int DoFileSave(void)
     WriteFile(hFile, pText, dwLen * sizeof(wchar_t), &dwWritten, NULL);
 
     CloseHandle(hFile);
-    LocalFree(pText);
+    if (!g_bPagedMode) LocalFree(pText);
 
     g_bDirty = 0;
     UpdateTitle();
@@ -2958,6 +3463,7 @@ static void DoQuickNote(void)
     int needsInit = 0;
 
     if (!PromptSave()) return;
+    PagedReset();
 
     /* Check for storage card if preferred (and not skipped this session) */
     if (g_bQuickNoteStorage && !s_bSkipStorageCard) {
@@ -3496,6 +4002,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_EDIT:
             /* Edit control notification */
             if (HIWORD(wParam) == EN_CHANGE) {
+                if (g_bPagedLoading) {
+                    RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
+                    return 0;
+                }
+                if (g_bPagedMode) g_bPagedPageDirty = 1;
                 if (!g_bDirty) {
                     g_bDirty = 1;
                     UpdateTitle();
@@ -3540,6 +4051,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         CloseReplaceTypingGroup();
+        PagedReset();
         g_bVScrollThumbTrackActive = 0;
         g_bPostJumpRepaintPending = 0;
         while (g_busyDepth > 0) EndBusyCursor(L"destroy");
