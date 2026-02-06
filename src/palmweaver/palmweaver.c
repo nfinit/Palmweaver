@@ -1626,7 +1626,7 @@ static void OnSize(HWND hwnd, int cx, int cy)
             if (hscrollHeight <= 0) hscrollHeight = 16;
             showPagedCorner = 1;
         }
-        if (editWidth > vscrollWidth) editWidth -= vscrollWidth;
+        if (reservePagedScroll && editWidth > vscrollWidth) editWidth -= vscrollWidth;
     }
     vscrollHeight = editHeight - hscrollHeight;
     if (vscrollHeight < 0) vscrollHeight = 0;
@@ -1664,10 +1664,11 @@ static void OnSize(HWND hwnd, int cx, int cy)
 
     if (g_hwndPagedSeam) {
         if (reservePagedScroll) {
-            int seamTop = cbHeight + 1;
-            int seamX = editLeft + editWidth - 1;
+            int arrowSpan = vscrollWidth;
+            int seamTop = cbHeight + arrowSpan + 1;
+            int seamX = editLeft + editWidth - 2;
             int seamWidth = 1;  /* Divider only */
-            int seamHeight = vscrollHeight - 2;
+            int seamHeight = vscrollHeight - (arrowSpan * 2) - 2;
             if (seamHeight < 0) seamHeight = 0;
             SetWindowPos(g_hwndPagedSeam, HWND_TOP,
                 seamX,
