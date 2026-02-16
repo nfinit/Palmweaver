@@ -81,6 +81,7 @@ static int g_lineNumWidth = 20;
 static UINT g_lineNumDirtyFlags = 0;
 static int g_lineNumTimerActive = 0;
 static UINT g_lineNumTextSeq = 0;
+static UINT g_statusTotalsSeq = 1;
 static int g_busyDepth = 0;
 static int g_bMousePresent = 1;
 
@@ -151,6 +152,8 @@ static wchar_t *g_pagedText = NULL;
 static int g_pagedTextLen = 0;
 static int g_pagedPageStart = 0;
 static int g_pagedPageLen = 0;
+static wchar_t *g_pagedSwapBuf = NULL;
+static int g_pagedSwapCap = 0;
 static int *g_pagedLineStarts = NULL;
 static int g_pagedLineCount = 1;
 static int g_bMainDestroying = 0;
@@ -178,6 +181,7 @@ static void UpdateTitle(void);
 static void BeginBusyCursor(const wchar_t *tag);
 static void EndBusyCursor(const wchar_t *tag);
 static void ForceIdleCursor(void);
+static void MarkStatusTotalsDirty(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
 static void ClearStatusMessage(void);
@@ -199,6 +203,7 @@ static int PagedLoadWindowAt(int globalPos);
 static int PagedEnableWithText(wchar_t *text, int len);
 static int PagedGetWindowChars(void);
 static int PagedGetEdgeChars(void);
+static int PagedEnsureSwapBuffer(int requiredChars);
 static int PagedGetGlobalSelStart(void);
 static void PagedIndexToLineCol(int index, int *outLine, int *outCol);
 static int PagedGetGlobalLineFromLocalChar(int localChar);
@@ -261,6 +266,12 @@ static void BeginBusyCursor(const wchar_t *tag)
     if (g_hwndStatus) UpdateStatus();
 }
 
+static void MarkStatusTotalsDirty(void)
+{
+    g_statusTotalsSeq++;
+    if (g_statusTotalsSeq == 0) g_statusTotalsSeq = 1;
+}
+
 static void EndBusyCursor(const wchar_t *tag)
 {
     if (g_busyDepth <= 0) return;
@@ -282,12 +293,17 @@ static void PagedReset(void)
         LocalFree(g_pagedLineStarts);
         g_pagedLineStarts = NULL;
     }
+    if (g_pagedSwapBuf) {
+        LocalFree(g_pagedSwapBuf);
+        g_pagedSwapBuf = NULL;
+    }
     g_bPagedMode = 0;
     g_bPagedLoading = 0;
     g_bPagedPageDirty = 0;
     g_pagedTextLen = 0;
     g_pagedPageStart = 0;
     g_pagedPageLen = 0;
+    g_pagedSwapCap = 0;
     g_pagedLineCount = 1;
 
     if (wasPaged && g_hwndMain && g_hwndEdit && g_hwndStatus && !g_bMainDestroying) {
@@ -340,6 +356,40 @@ static int PagedGetEdgeChars(void)
     return edgeChars;
 }
 
+static int PagedEnsureSwapBuffer(int requiredChars)
+{
+    int newCap;
+    wchar_t *newBuf;
+
+    if (requiredChars < 1) requiredChars = 1;
+
+    if (g_pagedSwapBuf && g_pagedSwapCap >= requiredChars) return 1;
+
+    newCap = g_pagedSwapCap;
+    if (newCap < 4096) newCap = 4096;
+    while (newCap < requiredChars) {
+        if (newCap > 131072) {
+            newCap = requiredChars;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+    if (!newBuf) {
+        if (newCap != requiredChars) {
+            newCap = requiredChars;
+            newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+        }
+        if (!newBuf) return 0;
+    }
+
+    if (g_pagedSwapBuf) LocalFree(g_pagedSwapBuf);
+    g_pagedSwapBuf = newBuf;
+    g_pagedSwapCap = newCap;
+    return 1;
+}
+
 static int PagedCommitPage(void)
 {
     int curLen;
@@ -387,6 +437,7 @@ static int PagedCommitPage(void)
     g_bPagedPageDirty = 0;
 
     PagedRebuildLineStarts();
+    MarkStatusTotalsDirty();
     return 1;
 }
 
@@ -394,7 +445,6 @@ static int PagedLoadWindowAt(int globalPos)
 {
     int start, end, maxStart, pageLen, localPos, i;
     int windowChars;
-    wchar_t *pageText;
 
     if (!g_bPagedMode || !g_pagedText || !g_hwndEdit) return 0;
 
@@ -416,13 +466,12 @@ static int PagedLoadWindowAt(int globalPos)
     pageLen = end - start;
     if (pageLen < 0) pageLen = 0;
 
-    pageText = (wchar_t *)LocalAlloc(LMEM_FIXED, (pageLen + 1) * sizeof(wchar_t));
-    if (!pageText) return 0;
-    for (i = 0; i < pageLen; i++) pageText[i] = g_pagedText[start + i];
-    pageText[pageLen] = 0;
+    if (!PagedEnsureSwapBuffer(pageLen + 1)) return 0;
+    for (i = 0; i < pageLen; i++) g_pagedSwapBuf[i] = g_pagedText[start + i];
+    g_pagedSwapBuf[pageLen] = 0;
 
     g_bPagedLoading = 1;
-    SetWindowTextW(g_hwndEdit, pageText);
+    SetWindowTextW(g_hwndEdit, g_pagedSwapBuf);
     g_bPagedLoading = 0;
 
     g_pagedPageStart = start;
@@ -439,8 +488,6 @@ static int PagedLoadWindowAt(int globalPos)
     Undo_Clear();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     UpdateStatus();
-
-    LocalFree(pageText);
     return 1;
 }
 
@@ -455,6 +502,7 @@ static int PagedEnableWithText(wchar_t *text, int len)
     g_pagedPageStart = 0;
     g_pagedPageLen = 0;
     g_bPagedPageDirty = 0;
+    MarkStatusTotalsDirty();
 
     if (!PagedRebuildLineStarts()) {
         PagedReset();
@@ -955,6 +1003,12 @@ static int IsLikelyTypingKey(UINT vk, int ctrl, int alt)
     return 1;
 }
 
+static int IsModifierOrToggleKey(UINT vk)
+{
+    return (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+            vk == VK_CAPITAL || vk == VK_NUMLOCK || vk == VK_SCROLL);
+}
+
 static void CloseReplaceTypingGroup(void)
 {
     if (g_bReplaceTypingGroupOpen) {
@@ -1216,6 +1270,12 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
     }
 
+    /* Clear temporary status only on real key actions, not key-release noise. */
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) &&
+        !IsModifierOrToggleKey((UINT)wParam)) {
+        ClearStatusMessage();
+    }
+
     /* Global shortcuts first */
     if (HandleGlobalKeys(msg, wParam))
         return 0;
@@ -1403,7 +1463,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     if (msg == WM_KEYUP || msg == WM_LBUTTONUP) {
         if (g_bPagedMode) PagedMaybeShiftWindowByCaret();
-        ClearStatusMessage();
+        if (msg == WM_LBUTTONUP) ClearStatusMessage();
         UpdateStatus();
         RequestLineNumberRefresh(LINENUM_DIRTY_SCROLL, 0);
         if (g_bPagedMode) PagedSyncVScroll();
@@ -2689,16 +2749,19 @@ static void UpdateFont(void)
 
 /* Options dialog - tabbed layout */
 static HWND g_hwndOptTab = NULL;
-static HWND g_optEditorCtrls[8];   /* Editor tab controls */
-static HWND g_optDisplayCtrls[5];  /* Display tab controls */
-static HWND g_optStorageCtrls[2];  /* Storage tab controls */
+#define OPT_EDITOR_CTRL_COUNT 9
+#define OPT_DISPLAY_CTRL_COUNT 5
+#define OPT_STORAGE_CTRL_COUNT 2
+static HWND g_optEditorCtrls[OPT_EDITOR_CTRL_COUNT];   /* Editor tab controls */
+static HWND g_optDisplayCtrls[OPT_DISPLAY_CTRL_COUNT]; /* Display tab controls */
+static HWND g_optStorageCtrls[OPT_STORAGE_CTRL_COUNT]; /* Storage tab controls */
 
 static void ShowOptionsTab(int tab)
 {
     int i;
-    for (i = 0; i < 8; i++) ShowWindow(g_optEditorCtrls[i], tab == 0 ? SW_SHOW : SW_HIDE);
-    for (i = 0; i < 5; i++) ShowWindow(g_optDisplayCtrls[i], tab == 1 ? SW_SHOW : SW_HIDE);
-    for (i = 0; i < 2; i++) ShowWindow(g_optStorageCtrls[i], tab == 2 ? SW_SHOW : SW_HIDE);
+    for (i = 0; i < OPT_EDITOR_CTRL_COUNT; i++) ShowWindow(g_optEditorCtrls[i], tab == 0 ? SW_SHOW : SW_HIDE);
+    for (i = 0; i < OPT_DISPLAY_CTRL_COUNT; i++) ShowWindow(g_optDisplayCtrls[i], tab == 1 ? SW_SHOW : SW_HIDE);
+    for (i = 0; i < OPT_STORAGE_CTRL_COUNT; i++) ShowWindow(g_optStorageCtrls[i], tab == 2 ? SW_SHOW : SW_HIDE);
 }
 
 static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -2835,6 +2898,8 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             InvalidateColumnIndicator();
 
             newSizeIdx = (int)SendMessageW(g_optDisplayCtrls[1], CB_GETCURSEL, 0, 0);
+            if (newSizeIdx < 0 || newSizeIdx >= (int)(sizeof(g_fontSizes) / sizeof(g_fontSizes[0])))
+                newSizeIdx = g_fontSizeIdx;
             newFixed = (int)SendMessage(g_hwndOptFixedFont, BM_GETCHECK, 0, 0);
             if (newSizeIdx != g_fontSizeIdx || newFixed != g_bFixedFont) {
                 g_fontSizeIdx = newSizeIdx;
@@ -3404,11 +3469,14 @@ static void UpdateStatus(void)
     static DWORD s_lastSelStart = (DWORD)-1;
     static int s_lastLines = -1;
     static int s_lastChars = -1;
+    static UINT s_lastTotalsSeq = 0;
     static DWORD s_nextTotalsTick = 0;
     DWORD selStart, selEnd;
     DWORD selGlobal;
     int line, col;
     int lineStart;
+    int totalLines;
+    int totalChars;
     DWORD nowTick;
     wchar_t buf[64];
 
@@ -3416,6 +3484,7 @@ static void UpdateStatus(void)
 
     if (g_bForceStatusRefresh) {
         s_lastSelStart = (DWORD)-1;
+        s_lastTotalsSeq = 0;
         s_nextTotalsTick = 0;
         g_bForceStatusRefresh = 0;
     }
@@ -3447,11 +3516,12 @@ static void UpdateStatus(void)
         SendMessageW(g_hwndStatus, SB_SETTEXTW, 0, (LPARAM)buf);
     }
 
-    /* Throttle expensive totals on large documents. */
-    nowTick = GetTickCount();
-    if (s_nextTotalsTick == 0 || (LONG)(nowTick - s_nextTotalsTick) >= 0) {
-        int totalLines;
-        int totalChars;
+    /* Recompute totals only after text changes, still throttled for responsiveness. */
+    if (s_lastTotalsSeq != g_statusTotalsSeq) {
+        nowTick = GetTickCount();
+        if (s_nextTotalsTick != 0 && (LONG)(nowTick - s_nextTotalsTick) < 0) {
+            return;
+        }
 
         if (g_bPagedMode) {
             totalLines = g_pagedLineCount;
@@ -3461,6 +3531,7 @@ static void UpdateStatus(void)
             totalChars = GetWindowTextLengthW(g_hwndEdit);
         }
 
+        s_lastTotalsSeq = g_statusTotalsSeq;
         s_nextTotalsTick = nowTick + STATUS_TOTALS_INTERVAL_MS;
 
         if (totalLines != s_lastLines || totalChars != s_lastChars) {
@@ -4388,6 +4459,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     return 0;
                 }
                 if (g_bPagedMode) g_bPagedPageDirty = 1;
+                MarkStatusTotalsDirty();
                 if (!g_bDirty) {
                     g_bDirty = 1;
                     UpdateTitle();
