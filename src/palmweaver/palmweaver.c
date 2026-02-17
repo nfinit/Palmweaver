@@ -95,6 +95,7 @@ static int g_bMousePresent = 1;
 #define EDIT_TEXT_LIMIT          0x7FFFFFFE
 #define STATUS_TOTALS_INTERVAL_MS 350
 #define BUSY_TEXT_THRESHOLD      65535
+#define FILE_LOAD_MAX_BYTES      (2UL * 1024UL * 1024UL)
 #define PAGED_MODE_THRESHOLD_CHARS 60000
 #define PAGED_WINDOW_CHARS_NOWRAP 49152
 #define PAGED_WINDOW_CHARS_WRAP   16384
@@ -181,6 +182,7 @@ static void UpdateTitle(void);
 static void BeginBusyCursor(const wchar_t *tag);
 static void EndBusyCursor(const wchar_t *tag);
 static void ForceIdleCursor(void);
+static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel);
 static void MarkStatusTotalsDirty(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
@@ -279,6 +281,37 @@ static void EndBusyCursor(const wchar_t *tag)
     (void)tag;
     g_busyDepth--;
     if (g_hwndStatus) UpdateStatus();
+}
+
+static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel)
+{
+    DWORD fileSize;
+    DWORD sizeErr;
+    wchar_t msg[192];
+
+    if (!outSize || hFile == INVALID_HANDLE_VALUE) return 0;
+
+    fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == INVALID_FILE_SIZE) {
+        sizeErr = GetLastError();
+        if (sizeErr != NO_ERROR) {
+            MessageBoxW(g_hwndMain, L"Cannot determine file size.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return 0;
+        }
+    }
+
+    if (fileSize > FILE_LOAD_MAX_BYTES) {
+        if (sourceLabel && sourceLabel[0]) {
+            wsprintfW(msg, L"%s file is too large to open safely on this device.", sourceLabel);
+        } else {
+            lstrcpyW(msg, L"File is too large to open safely on this device.");
+        }
+        MessageBoxW(g_hwndMain, msg, g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    *outSize = fileSize;
+    return 1;
 }
 
 static void PagedReset(void)
@@ -3545,7 +3578,10 @@ static void OpenRecentFile(int index)
         return;
     }
 
-    dwSize = GetFileSize(hFile, NULL);
+    if (!GetLoadFileSizeGuarded(hFile, &dwSize, NULL)) {
+        CloseHandle(hFile);
+        return;
+    }
     if (dwSize > BUSY_TEXT_THRESHOLD) {
         SetStatusMessage(L"Loading file...");
         BeginBusyCursor(L"openrecent");
@@ -3848,7 +3884,10 @@ static int DoFileOpen(void)
         return 0;
     }
 
-    dwSize = GetFileSize(hFile, NULL);
+    if (!GetLoadFileSizeGuarded(hFile, &dwSize, NULL)) {
+        CloseHandle(hFile);
+        return 0;
+    }
     if (dwSize > BUSY_TEXT_THRESHOLD) {
         SetStatusMessage(L"Loading file...");
         BeginBusyCursor(L"open");
@@ -4097,7 +4136,10 @@ static void DoQuickNote(void)
 
     if (hFile != INVALID_HANDLE_VALUE) {
         /* Load existing content */
-        dwSize = GetFileSize(hFile, NULL);
+        if (!GetLoadFileSizeGuarded(hFile, &dwSize, L"Quick Note")) {
+            CloseHandle(hFile);
+            return;
+        }
         pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 2);
         if (pBuf) {
             ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
