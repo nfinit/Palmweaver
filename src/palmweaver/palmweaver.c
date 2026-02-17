@@ -4260,6 +4260,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SetFocus(g_hwndEdit);
             UpdateTitle();
             UpdateStatus();
+            SetStatusMessage(L"Palmweaver " PALMWEAVER_VERSION);
             RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
         }
         return 0;
