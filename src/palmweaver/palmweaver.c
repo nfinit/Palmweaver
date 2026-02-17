@@ -158,6 +158,10 @@ static int g_pagedSwapCap = 0;
 static int *g_pagedLineStarts = NULL;
 static int g_pagedLineCount = 1;
 static int g_bMainDestroying = 0;
+static char *g_fileIoByteBuf = NULL;
+static DWORD g_fileIoByteCap = 0;
+static wchar_t *g_fileIoWideBuf = NULL;
+static int g_fileIoWideCap = 0;
 
 /* Window class name */
 static const WCHAR g_szClassName[] = L"PalmweaverMain";
@@ -183,6 +187,10 @@ static void BeginBusyCursor(const wchar_t *tag);
 static void EndBusyCursor(const wchar_t *tag);
 static void ForceIdleCursor(void);
 static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel);
+static int EnsureFileIoByteBuffer(DWORD requiredBytes);
+static int EnsureFileIoWideBuffer(int requiredChars);
+static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen);
+static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len);
 static void MarkStatusTotalsDirty(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
@@ -312,6 +320,123 @@ static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *s
 
     *outSize = fileSize;
     return 1;
+}
+
+static int EnsureFileIoByteBuffer(DWORD requiredBytes)
+{
+    DWORD newCap;
+    char *newBuf;
+
+    if (requiredBytes < 1) requiredBytes = 1;
+    if (g_fileIoByteBuf && g_fileIoByteCap >= requiredBytes) return 1;
+
+    newCap = g_fileIoByteCap;
+    if (newCap < 4096) newCap = 4096;
+    while (newCap < requiredBytes) {
+        if (newCap > 0x40000000UL) {
+            newCap = requiredBytes;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    newBuf = (char *)LocalAlloc(LMEM_FIXED, newCap);
+    if (!newBuf) {
+        newCap = requiredBytes;
+        newBuf = (char *)LocalAlloc(LMEM_FIXED, newCap);
+        if (!newBuf) return 0;
+    }
+
+    if (g_fileIoByteBuf) LocalFree(g_fileIoByteBuf);
+    g_fileIoByteBuf = newBuf;
+    g_fileIoByteCap = newCap;
+    return 1;
+}
+
+static int EnsureFileIoWideBuffer(int requiredChars)
+{
+    int newCap;
+    wchar_t *newBuf;
+
+    if (requiredChars < 1) requiredChars = 1;
+    if (g_fileIoWideBuf && g_fileIoWideCap >= requiredChars) return 1;
+
+    newCap = g_fileIoWideCap;
+    if (newCap < 4096) newCap = 4096;
+    while (newCap < requiredChars) {
+        if (newCap > 0x20000000) {
+            newCap = requiredChars;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+    if (!newBuf) {
+        newCap = requiredChars;
+        newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+        if (!newBuf) return 0;
+    }
+
+    if (g_fileIoWideBuf) LocalFree(g_fileIoWideBuf);
+    g_fileIoWideBuf = newBuf;
+    g_fileIoWideCap = newCap;
+    return 1;
+}
+
+static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen)
+{
+    DWORD dwRead = 0;
+    int i;
+    int textLen = 0;
+    int nChars = 0;
+    wchar_t *pWide = NULL;
+
+    if (!outText || !outLen || hFile == INVALID_HANDLE_VALUE) return 0;
+    *outText = NULL;
+    *outLen = 0;
+
+    if (!EnsureFileIoByteBuffer(fileSize + 2)) return 0;
+    if (!ReadFile(hFile, g_fileIoByteBuf, fileSize, &dwRead, NULL)) return 0;
+
+    g_fileIoByteBuf[dwRead] = 0;
+    g_fileIoByteBuf[dwRead + 1] = 0;
+
+    if (dwRead >= 2 &&
+        (unsigned char)g_fileIoByteBuf[0] == 0xFF &&
+        (unsigned char)g_fileIoByteBuf[1] == 0xFE) {
+        nChars = (int)((dwRead - 2) / sizeof(wchar_t));
+        if (!EnsureFileIoWideBuffer(nChars + 1)) return 0;
+        pWide = (wchar_t *)(g_fileIoByteBuf + 2);
+        for (i = 0; i < nChars; i++) g_fileIoWideBuf[i] = pWide[i];
+        g_fileIoWideBuf[nChars] = 0;
+        textLen = nChars;
+    } else {
+        if (!EnsureFileIoWideBuffer((int)dwRead + 1)) return 0;
+        for (i = 0; i < (int)dwRead; i++)
+            g_fileIoWideBuf[i] = (wchar_t)(unsigned char)g_fileIoByteBuf[i];
+        g_fileIoWideBuf[dwRead] = 0;
+        textLen = (int)dwRead;
+    }
+
+    *outText = g_fileIoWideBuf;
+    *outLen = textLen;
+    return 1;
+}
+
+static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len)
+{
+    wchar_t *owned;
+    int i;
+
+    if (!text || len < 0) return NULL;
+
+    owned = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+    if (!owned) return NULL;
+
+    for (i = 0; i < len; i++) owned[i] = text[i];
+    owned[len] = 0;
+    return owned;
 }
 
 static void PagedReset(void)
@@ -3559,10 +3684,9 @@ static void OpenRecentFile(int index)
 {
     wchar_t path[MAX_PATH];
     HANDLE hFile;
-    DWORD dwSize, dwRead;
-    char *pBuf;
+    DWORD dwSize;
     wchar_t *pWBuf = NULL;
-    int i;
+    wchar_t *pagedOwned = NULL;
     int textLen = 0;
     int busy = 0;
 
@@ -3587,53 +3711,29 @@ static void OpenRecentFile(int index)
         BeginBusyCursor(L"openrecent");
         busy = 1;
     }
-    pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 1);
-    if (!pBuf) {
+    if (!ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &textLen)) {
         CloseHandle(hFile);
         if (busy) {
             EndBusyCursor(L"openrecent");
             ClearStatusMessage();
         }
+        MessageBoxW(g_hwndMain, L"Cannot load file.", g_szAppTitle, MB_OK | MB_ICONERROR);
         return;
     }
-
-    ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
     CloseHandle(hFile);
-    pBuf[dwRead] = 0;
-
-    if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
-        int nChars = (dwRead - 2) / sizeof(wchar_t);
-        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (nChars + 1) * sizeof(wchar_t));
-        if (pWBuf) {
-            wchar_t *pWide = (wchar_t *)(pBuf + 2);
-            for (i = 0; i < nChars; i++) pWBuf[i] = pWide[i];
-            pWBuf[nChars] = 0;
-            textLen = nChars;
-        }
-    } else {
-        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwRead + 1) * sizeof(wchar_t));
-        if (pWBuf) {
-            for (i = 0; i < (int)dwRead; i++)
-                pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
-            pWBuf[dwRead] = 0;
-            textLen = (int)dwRead;
-        }
-    }
-
-    LocalFree(pBuf);
-
-    if (!pWBuf) {
-        if (busy) {
-            EndBusyCursor(L"openrecent");
-            ClearStatusMessage();
-        }
-        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
-        return;
-    }
 
     if (textLen > PAGED_MODE_THRESHOLD_CHARS) {
-        if (!PagedEnableWithText(pWBuf, textLen)) {
-            LocalFree(pWBuf);
+        pagedOwned = AllocOwnedUnicodeCopy(pWBuf, textLen);
+        if (!pagedOwned) {
+            if (busy) {
+                EndBusyCursor(L"openrecent");
+                ClearStatusMessage();
+            }
+            MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+        if (!PagedEnableWithText(pagedOwned, textLen)) {
+            LocalFree(pagedOwned);
             if (busy) {
                 EndBusyCursor(L"openrecent");
                 ClearStatusMessage();
@@ -3644,7 +3744,6 @@ static void OpenRecentFile(int index)
     } else {
         PagedReset();
         SetWindowTextW(g_hwndEdit, pWBuf);
-        LocalFree(pWBuf);
     }
 
     lstrcpyW(g_szFilePath, path);
@@ -3863,10 +3962,9 @@ static int DoFileOpen(void)
 {
     wchar_t szFile[MAX_PATH] = L"";
     HANDLE hFile;
-    DWORD dwSize, dwRead;
-    char *pBuf;
+    DWORD dwSize;
     wchar_t *pWBuf = NULL;
-    int i;
+    wchar_t *pagedOwned = NULL;
     int textLen = 0;
     int busy = 0;
 
@@ -3893,56 +3991,29 @@ static int DoFileOpen(void)
         BeginBusyCursor(L"open");
         busy = 1;
     }
-
-    /* Allocate buffer for file content + null */
-    pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 1);
-    if (!pBuf) {
+    if (!ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &textLen)) {
         CloseHandle(hFile);
         if (busy) {
             EndBusyCursor(L"open");
             ClearStatusMessage();
         }
-        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        MessageBoxW(g_hwndMain, L"Cannot load file.", g_szAppTitle, MB_OK | MB_ICONERROR);
         return 0;
     }
-
-    ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
     CloseHandle(hFile);
-    pBuf[dwRead] = 0;
-
-    /* Convert file bytes to Unicode text buffer */
-    if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
-        int nChars = (dwRead - 2) / sizeof(wchar_t);
-        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (nChars + 1) * sizeof(wchar_t));
-        if (pWBuf) {
-            wchar_t *pWide = (wchar_t *)(pBuf + 2);
-            for (i = 0; i < nChars; i++) pWBuf[i] = pWide[i];
-            pWBuf[nChars] = 0;
-            textLen = nChars;
-        }
-    } else {
-        pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (dwRead + 1) * sizeof(wchar_t));
-        if (pWBuf) {
-            for (i = 0; i < (int)dwRead; i++) pWBuf[i] = (wchar_t)(unsigned char)pBuf[i];
-            pWBuf[dwRead] = 0;
-            textLen = (int)dwRead;
-        }
-    }
-
-    LocalFree(pBuf);
-
-    if (!pWBuf) {
-        if (busy) {
-            EndBusyCursor(L"open");
-            ClearStatusMessage();
-        }
-        MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
-        return 0;
-    }
 
     if (textLen > PAGED_MODE_THRESHOLD_CHARS) {
-        if (!PagedEnableWithText(pWBuf, textLen)) {
-            LocalFree(pWBuf);
+        pagedOwned = AllocOwnedUnicodeCopy(pWBuf, textLen);
+        if (!pagedOwned) {
+            if (busy) {
+                EndBusyCursor(L"open");
+                ClearStatusMessage();
+            }
+            MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return 0;
+        }
+        if (!PagedEnableWithText(pagedOwned, textLen)) {
+            LocalFree(pagedOwned);
             if (busy) {
                 EndBusyCursor(L"open");
                 ClearStatusMessage();
@@ -3953,7 +4024,6 @@ static int DoFileOpen(void)
     } else {
         PagedReset();
         SetWindowTextW(g_hwndEdit, pWBuf);
-        LocalFree(pWBuf);
     }
 
     lstrcpyW(g_szFilePath, szFile);
@@ -4064,10 +4134,9 @@ static void DoQuickNote(void)
     wchar_t notesDir[MAX_PATH];
     wchar_t path[MAX_PATH];
     HANDLE hFile;
-    DWORD dwSize, dwRead, attr;
-    char *pBuf;
-    wchar_t *pWBuf;
-    int len, i;
+    DWORD dwSize, attr;
+    wchar_t *pWBuf = NULL;
+    int len;
     int useStorage = 0;
     int needsInit = 0;
 
@@ -4140,31 +4209,14 @@ static void DoQuickNote(void)
             CloseHandle(hFile);
             return;
         }
-        pBuf = (char *)LocalAlloc(LMEM_FIXED, dwSize + 2);
-        if (pBuf) {
-            ReadFile(hFile, pBuf, dwSize, &dwRead, NULL);
-            CloseHandle(hFile);
-            pBuf[dwRead] = 0;
-            pBuf[dwRead + 1] = 0;
-
-            /* Check for UTF-16 BOM */
-            if (dwRead >= 2 && (unsigned char)pBuf[0] == 0xFF && (unsigned char)pBuf[1] == 0xFE) {
-                SetWindowTextW(g_hwndEdit, (wchar_t *)(pBuf + 2));
-            } else {
-                /* Convert ANSI to Unicode */
-                len = dwRead;
-                pWBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-                if (pWBuf) {
-                    for (i = 0; i < len; i++) pWBuf[i] = (unsigned char)pBuf[i];
-                    pWBuf[len] = 0;
-                    SetWindowTextW(g_hwndEdit, pWBuf);
-                    LocalFree(pWBuf);
-                }
-            }
-            LocalFree(pBuf);
+        if (ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &len)) {
+            SetWindowTextW(g_hwndEdit, pWBuf);
         } else {
+            MessageBoxW(g_hwndMain, L"Cannot load Quick Note file.", g_szAppTitle, MB_OK | MB_ICONERROR);
             CloseHandle(hFile);
+            return;
         }
+        CloseHandle(hFile);
     } else {
         /* New file - start empty */
         SetWindowTextW(g_hwndEdit, L"");
@@ -4735,6 +4787,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         RestoreSelectionColors();
         SaveSettings();
+        if (g_fileIoByteBuf) {
+            LocalFree(g_fileIoByteBuf);
+            g_fileIoByteBuf = NULL;
+            g_fileIoByteCap = 0;
+        }
+        if (g_fileIoWideBuf) {
+            LocalFree(g_fileIoWideBuf);
+            g_fileIoWideBuf = NULL;
+            g_fileIoWideCap = 0;
+        }
         if (g_hBrushBg) DeleteObject(g_hBrushBg);
         if (g_hBrushColInd) DeleteObject(g_hBrushColInd);
         if (g_hFont) DeleteObject(g_hFont);
