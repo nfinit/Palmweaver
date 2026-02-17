@@ -412,11 +412,26 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
         g_fileIoWideBuf[nChars] = 0;
         textLen = nChars;
     } else {
-        if (!EnsureFileIoWideBuffer((int)dwRead + 1)) return 0;
-        for (i = 0; i < (int)dwRead; i++)
-            g_fileIoWideBuf[i] = (wchar_t)(unsigned char)g_fileIoByteBuf[i];
-        g_fileIoWideBuf[dwRead] = 0;
-        textLen = (int)dwRead;
+        int converted = 0;
+        int needChars = 0;
+
+        /* Prefer system ACP conversion when available; fall back to byte widening on CE variants. */
+        needChars = MultiByteToWideChar(CP_ACP, 0, g_fileIoByteBuf, (int)dwRead, NULL, 0);
+        if (needChars > 0) {
+            if (!EnsureFileIoWideBuffer(needChars + 1)) return 0;
+            converted = MultiByteToWideChar(CP_ACP, 0, g_fileIoByteBuf, (int)dwRead, g_fileIoWideBuf, needChars);
+        }
+
+        if (converted > 0) {
+            g_fileIoWideBuf[converted] = 0;
+            textLen = converted;
+        } else {
+            if (!EnsureFileIoWideBuffer((int)dwRead + 1)) return 0;
+            for (i = 0; i < (int)dwRead; i++)
+                g_fileIoWideBuf[i] = (wchar_t)(unsigned char)g_fileIoByteBuf[i];
+            g_fileIoWideBuf[dwRead] = 0;
+            textLen = (int)dwRead;
+        }
     }
 
     *outText = g_fileIoWideBuf;
