@@ -1977,6 +1977,57 @@ static int CharsMatch(wchar_t c1, wchar_t c2)
     return c1 == c2;
 }
 
+static int BufferMatchAt(const wchar_t *buf, int len, int pos, const wchar_t *needle, int needleLen)
+{
+    int i;
+
+    if (!buf || !needle || needleLen <= 0) return 0;
+    if (pos < 0 || pos + needleLen > len) return 0;
+
+    for (i = 0; i < needleLen; i++) {
+        if (!CharsMatch(buf[pos + i], needle[i])) return 0;
+    }
+    return 1;
+}
+
+static int FindNextMatchInBuffer(const wchar_t *buf, int len,
+    const wchar_t *needle, int needleLen, int start,
+    int *outFoundAt, int *outWrapped)
+{
+    int i, j;
+
+    if (outFoundAt) *outFoundAt = -1;
+    if (outWrapped) *outWrapped = 0;
+
+    if (!buf || !needle || needleLen <= 0 || len < needleLen) return 0;
+
+    if (start < 0) start = 0;
+    if (start > len) start = 0;
+
+    for (i = start; i <= len - needleLen; i++) {
+        for (j = 0; j < needleLen; j++) {
+            if (!CharsMatch(buf[i + j], needle[j])) break;
+        }
+        if (j == needleLen) {
+            if (outFoundAt) *outFoundAt = i;
+            return 1;
+        }
+    }
+
+    for (i = 0; i < start && i <= len - needleLen; i++) {
+        for (j = 0; j < needleLen; j++) {
+            if (!CharsMatch(buf[i + j], needle[j])) break;
+        }
+        if (j == needleLen) {
+            if (outFoundAt) *outFoundAt = i;
+            if (outWrapped) *outWrapped = 1;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static void RefreshEditAfterLargeJump(void)
 {
     /* Force a full repaint after large jumps to avoid stale scroll artifacts on CE edit controls. */
@@ -1993,7 +2044,7 @@ static void QueueEditRepaintAfterJump(void)
 
 static void DoFindNext(void)
 {
-    int len, findLen, start, i, j, k;
+    int len, findLen, start, k;
     int canSelectRange, usePaged;
     int busy = 0;
     wchar_t *buf = NULL;
@@ -2037,34 +2088,12 @@ static void DoFindNext(void)
     }
 
     SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    (void)selEnd;
     if (usePaged) start = PagedGetGlobalSelStart() + 1;
     else start = (int)selStart + 1;
     if (start > len) start = 0;
 
-    /* Search forward with wrap */
-    for (i = start; i <= len - findLen; i++) {
-        for (j = 0; j < findLen; j++) {
-            if (!CharsMatch(buf[i + j], g_findText[j])) break;
-        }
-        if (j == findLen) {
-            foundAt = i;
-            wrapped = 0;
-            break;
-        }
-    }
-
-    if (foundAt < 0) {
-        for (i = 0; i < start && i <= len - findLen; i++) {
-            for (j = 0; j < findLen; j++) {
-                if (!CharsMatch(buf[i + j], g_findText[j])) break;
-            }
-            if (j == findLen) {
-                foundAt = i;
-                wrapped = 1;
-                break;
-            }
-        }
-    }
+    FindNextMatchInBuffer(buf, len, g_findText, findLen, start, &foundAt, &wrapped);
 
     if (foundAt >= 0) {
         if (usePaged) {
@@ -2208,17 +2237,115 @@ static void DoReplaceOne(void)
 {
     DWORD selStart, selEnd;
     int selLen, findLen, i, match = 1;
+    int replLen;
+    int len;
     wchar_t *buf;
     wchar_t msg[80];
-    int len, replLine, replCol, nextLine, nextCol;
+    int replLine, replCol, nextLine, nextCol;
 
     if (!g_findText[0]) return;
+
+    findLen = lstrlenW(g_findText);
+    replLen = lstrlenW(g_replaceText);
+
     if (g_bPagedMode) {
-        SetStatusMessage(L"Replace is not available in large file mode");
+        int globalStart;
+        int foundAt = -1;
+        int wrapped = 0;
+        int nextStart;
+        int nextFound = -1;
+        int nextWrapped = 0;
+        int newLen;
+        int tailStart, tailLen;
+        int localStart, localEnd;
+        wchar_t *newDoc;
+
+        if (!g_pagedText) return;
+        if (!PagedCommitPage()) return;
+
+        len = g_pagedTextLen;
+        if (len < findLen || findLen <= 0) {
+            SetStatusMessage(L"Text not found");
+            return;
+        }
+
+        SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        globalStart = g_pagedPageStart + (int)selStart;
+        if (globalStart < 0) globalStart = 0;
+        if (globalStart > len) globalStart = len;
+
+        if (BufferMatchAt(g_pagedText, len, globalStart, g_findText, findLen)) {
+            foundAt = globalStart;
+        } else {
+            nextStart = globalStart + 1;
+            if (nextStart > len) nextStart = 0;
+            if (!FindNextMatchInBuffer(g_pagedText, len, g_findText, findLen, nextStart, &foundAt, &wrapped)) {
+                SetStatusMessage(L"Text not found");
+                return;
+            }
+        }
+
+        PagedIndexToLineCol(foundAt, &replLine, &replCol);
+
+        newLen = len + (replLen - findLen);
+        if (newLen < 0) return;
+        newDoc = (wchar_t *)LocalAlloc(LMEM_FIXED, (newLen + 1) * sizeof(wchar_t));
+        if (!newDoc) {
+            MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        for (i = 0; i < foundAt; i++) newDoc[i] = g_pagedText[i];
+        for (i = 0; i < replLen; i++) newDoc[foundAt + i] = g_replaceText[i];
+        tailStart = foundAt + findLen;
+        tailLen = len - tailStart;
+        if (tailLen < 0) tailLen = 0;
+        for (i = 0; i < tailLen; i++) newDoc[foundAt + replLen + i] = g_pagedText[tailStart + i];
+        newDoc[newLen] = 0;
+
+        LocalFree(g_pagedText);
+        g_pagedText = newDoc;
+        g_pagedTextLen = newLen;
+        g_bPagedPageDirty = 0;
+        PagedRebuildLineStarts();
+        MarkStatusTotalsDirty();
+        g_bDirty = 1;
+        UpdateTitle();
+
+        nextStart = foundAt + replLen;
+        if (nextStart > g_pagedTextLen) nextStart = 0;
+        if (FindNextMatchInBuffer(g_pagedText, g_pagedTextLen, g_findText, findLen, nextStart, &nextFound, &nextWrapped)) {
+            if (PagedLoadWindowAt(nextFound)) {
+                localStart = nextFound - g_pagedPageStart;
+                localEnd = localStart + findLen;
+                if (localStart < 0) localStart = 0;
+                if (localEnd > g_pagedPageLen) localEnd = g_pagedPageLen;
+                SendMessageW(g_hwndEdit, EM_SETSEL, localStart, localEnd);
+                SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+                RefreshEditAfterLargeJump();
+            }
+            PagedIndexToLineCol(nextFound, &nextLine, &nextCol);
+            if (nextWrapped || wrapped) {
+                wsprintfW(msg, L"Replaced Ln %d Col %d, next Ln %d Col %d (wrapped)",
+                    replLine, replCol, nextLine, nextCol);
+            } else {
+                wsprintfW(msg, L"Replaced Ln %d Col %d, next Ln %d Col %d",
+                    replLine, replCol, nextLine, nextCol);
+            }
+        } else {
+            if (PagedLoadWindowAt(foundAt + replLen)) {
+                localStart = (foundAt + replLen) - g_pagedPageStart;
+                if (localStart < 0) localStart = 0;
+                if (localStart > g_pagedPageLen) localStart = g_pagedPageLen;
+                SendMessageW(g_hwndEdit, EM_SETSEL, localStart, localStart);
+                SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+            }
+            wsprintfW(msg, L"Replaced Ln %d Col %d, no more matches", replLine, replCol);
+        }
+        SetStatusMessage(msg);
         return;
     }
 
-    findLen = lstrlenW(g_findText);
     SendMessage(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
     selLen = selEnd - selStart;
     
@@ -2275,16 +2402,22 @@ static int DoReplaceAll(void)
     int len, findLen, replLen, count = 0, i, j;
     int busy = 0;
     wchar_t *buf, *newBuf, *p;
+    DWORD selStart;
+    int keepGlobalPos;
 
     if (!g_findText[0]) return 0;
-    if (g_bPagedMode) {
-        SetStatusMessage(L"Replace All is not available in large file mode");
-        return 0;
-    }
 
     findLen = lstrlenW(g_findText);
     replLen = lstrlenW(g_replaceText);
-    len = GetWindowTextLengthW(g_hwndEdit);
+
+    if (g_bPagedMode) {
+        if (!g_pagedText) return 0;
+        if (!PagedCommitPage()) return 0;
+        len = g_pagedTextLen;
+    } else {
+        len = GetWindowTextLengthW(g_hwndEdit);
+    }
+
     if (len == 0) return 0;
     if (len > BUSY_TEXT_THRESHOLD) {
         SetStatusMessage(L"Replacing...");
@@ -2292,15 +2425,24 @@ static int DoReplaceAll(void)
         busy = 1;
     }
 
-    buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    if (!buf) {
-        if (busy) {
-            EndBusyCursor(L"replall");
-            ClearStatusMessage();
+    if (g_bPagedMode) {
+        buf = g_pagedText;
+        SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, 0);
+        keepGlobalPos = g_pagedPageStart + (int)selStart;
+        if (keepGlobalPos < 0) keepGlobalPos = 0;
+        if (keepGlobalPos > len) keepGlobalPos = len;
+    } else {
+        buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
+        if (!buf) {
+            if (busy) {
+                EndBusyCursor(L"replall");
+                ClearStatusMessage();
+            }
+            return 0;
         }
-        return 0;
+        GetWindowTextW(g_hwndEdit, buf, len + 1);
+        keepGlobalPos = 0;
     }
-    GetWindowTextW(g_hwndEdit, buf, len + 1);
 
     /* Count matches */
     for (i = 0; i <= len - findLen; i++) {
@@ -2311,7 +2453,7 @@ static int DoReplaceAll(void)
     }
 
     if (count == 0) {
-        LocalFree(buf);
+        if (!g_bPagedMode) LocalFree(buf);
         if (busy) {
             EndBusyCursor(L"replall");
             ClearStatusMessage();
@@ -2322,7 +2464,7 @@ static int DoReplaceAll(void)
     newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED,
         (len + count * (replLen - findLen) + 1) * sizeof(wchar_t));
     if (!newBuf) {
-        LocalFree(buf);
+        if (!g_bPagedMode) LocalFree(buf);
         if (busy) {
             EndBusyCursor(L"replall");
             ClearStatusMessage();
@@ -2346,15 +2488,35 @@ static int DoReplaceAll(void)
     }
 
     /* Record undo: delete all, insert new */
-    Undo_RecordDelete(0, buf, len);
-    Undo_RecordInsert(0, newBuf, -1);
+    if (g_bPagedMode) {
+        int localPos;
+        LocalFree(g_pagedText);
+        g_pagedText = newBuf;
+        g_pagedTextLen = lstrlenW(newBuf);
+        g_bPagedPageDirty = 0;
+        PagedRebuildLineStarts();
+        MarkStatusTotalsDirty();
+        g_bDirty = 1;
+        UpdateTitle();
 
-    SetWindowTextW(g_hwndEdit, newBuf);
-    g_bDirty = 1;
-    UpdateTitle();
+        if (keepGlobalPos > g_pagedTextLen) keepGlobalPos = g_pagedTextLen;
+        if (PagedLoadWindowAt(keepGlobalPos)) {
+            localPos = keepGlobalPos - g_pagedPageStart;
+            if (localPos < 0) localPos = 0;
+            if (localPos > g_pagedPageLen) localPos = g_pagedPageLen;
+            SendMessageW(g_hwndEdit, EM_SETSEL, localPos, localPos);
+            SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+        }
+    } else {
+        Undo_RecordDelete(0, buf, len);
+        Undo_RecordInsert(0, newBuf, -1);
+        SetWindowTextW(g_hwndEdit, newBuf);
+        g_bDirty = 1;
+        UpdateTitle();
+        LocalFree(newBuf);
+        LocalFree(buf);
+    }
 
-    LocalFree(newBuf);
-    LocalFree(buf);
     if (busy) {
         EndBusyCursor(L"replall");
         ClearStatusMessage();
