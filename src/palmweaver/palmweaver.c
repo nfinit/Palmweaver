@@ -152,6 +152,7 @@ static int g_bPostJumpRepaintPending = 0;
 static int g_bPagedMode = 0;
 static int g_bPagedLoading = 0;
 static int g_bPagedPageDirty = 0;
+static int g_bPreserveUndoOnPagedLoad = 0;
 static wchar_t *g_pagedText = NULL;
 static int g_pagedTextLen = 0;
 static int g_pagedPageStart = 0;
@@ -718,7 +719,7 @@ static int PagedLoadWindowAt(int globalPos)
     SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
     /* Keep scrollbar position stable before heavier refresh work. */
     PagedSyncVScroll();
-    Undo_Clear();
+    if (!g_bPreserveUndoOnPagedLoad) Undo_Clear();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     UpdateStatus();
     return 1;
@@ -1431,12 +1432,14 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         if (!Undo_Perform()) {
             SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
         }
+        RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
         return 0;
     }
     
     /* Intercept Ctrl+Y for redo */
     if (msg == WM_KEYDOWN && wParam == 'Y' && GetKeyState(VK_CONTROL) < 0) {
         Undo_Redo();
+        RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
         return 0;
     }
     
@@ -3476,6 +3479,14 @@ static void UpdateLineNumbers(void)
     if (g_bPagedMode && g_pagedLineStarts && g_pagedLineCount > 0) {
         int globalIdx;
 
+        if (g_bPagedPageDirty) {
+            /* Keep paged line-start metadata aligned before rendering global gutter numbers. */
+            if (PagedCommitPage()) {
+                visLines = (int)SendMessage(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+                textLen = GetWindowTextLengthW(g_hwndEdit);
+            }
+        }
+
         if (cachedText) { LocalFree(cachedText); cachedText = NULL; }
         if (cachedLineStarts) { LocalFree(cachedLineStarts); cachedLineStarts = NULL; }
         cachedLineStartCount = 1;
@@ -3917,6 +3928,11 @@ static void UpdateStatus(void)
         if (g_bPagedMode) {
             totalLines = g_pagedLineCount;
             totalChars = g_pagedTextLen;
+            if (g_bPagedPageDirty) {
+                int curLen = GetWindowTextLengthW(g_hwndEdit);
+                totalChars = g_pagedTextLen - g_pagedPageLen + curLen;
+                if (totalChars < 0) totalChars = 0;
+            }
         } else {
             totalLines = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
             totalChars = GetWindowTextLengthW(g_hwndEdit);
@@ -4511,6 +4527,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 /* Fall back to built-in undo for user typing */
                 SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
             }
+            RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
             return 0;
 
         case IDM_EDIT_CUT:
@@ -4645,6 +4662,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 int selStart, selEnd;
                 int wasPaged = g_bPagedMode;
                 int pagedCaretGlobal = 0;
+                int oldPagedStart = 0;
                 int savedFirstVisible;
                 int savedTopChar;
                 int savedTopGlobal;
@@ -4659,6 +4677,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (savedTopChar < 0) savedTopChar = 0;
                 savedTopGlobal = savedTopChar;
                 if (wasPaged) {
+                    oldPagedStart = g_pagedPageStart;
                     pagedCaretGlobal = g_pagedPageStart + selStart;
                     savedTopGlobal = g_pagedPageStart + savedTopChar;
                     if (!PagedCommitPage()) {
@@ -4708,7 +4727,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
                 /* Restore text and selection */
                 if (wasPaged) {
-                    if (!PagedLoadWindowAt(pagedCaretGlobal)) {
+                    int loadOk;
+                    g_bPreserveUndoOnPagedLoad = 1;
+                    loadOk = PagedLoadWindowAt(pagedCaretGlobal);
+                    g_bPreserveUndoOnPagedLoad = 0;
+                    if (loadOk) {
+                        int undoDelta = oldPagedStart - g_pagedPageStart;
+                        if (undoDelta) Undo_ShiftPositions(undoDelta);
+                    }
+                    if (!loadOk) {
                         SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
                     }
                     {

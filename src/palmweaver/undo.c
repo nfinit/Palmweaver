@@ -124,19 +124,32 @@ static void ApplyRedoEntry(UndoEntry *e)
 }
 
 /*
- * Undo_Init - Initialize with target edit control
+ * Undo_Init - Initialize with target edit control.
+ * First call resets state; subsequent calls rebind to a recreated edit
+ * control while preserving existing undo/redo history.
  */
 void Undo_Init(HWND hwndEdit)
 {
     int i;
+
+    if (!hwndEdit) return;
+
+    if (s_hwndEdit) {
+        s_hwndEdit = hwndEdit;
+        /* Break any in-progress grouping across control recreation boundaries. */
+        s_groupDepth = 0;
+        s_groupId = 0;
+        if (s_nextGroupId <= 0) s_nextGroupId = 1;
+        return;
+    }
+
     s_hwndEdit = hwndEdit;
     s_undoCount = 0;
     s_redoCount = 0;
     for (i = 0; i < UNDO_MAX_ENTRIES; i++) {
-        s_undoStack[i].text = NULL;
-        s_undoStack[i].len = 0;
-        s_undoStack[i].cap = 0;
-        s_undoStack[i].group = 0;
+        FreeEntry(&s_undoStack[i]);
+        s_undoStack[i].type = 0;
+        s_undoStack[i].pos = 0;
     }
     s_groupDepth = 0;
     s_groupId = 0;
@@ -284,26 +297,18 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
  */
 static void DeleteRange(int start, int len)
 {
-    int totalLen = GetWindowTextLengthW(s_hwndEdit);
-    wchar_t *buf, *p;
-    int i;
+    int totalLen;
 
-    if (len <= 0 || start < 0 || start + len > totalLen) return;
+    if (!s_hwndEdit || len <= 0 || start < 0) return;
+    totalLen = GetWindowTextLengthW(s_hwndEdit);
+    if (start > totalLen) return;
+    if (start + len > totalLen) len = totalLen - start;
+    if (len <= 0) return;
 
-    buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (totalLen + 1) * sizeof(wchar_t));
-    if (!buf) return;
-
-    GetWindowTextW(s_hwndEdit, buf, totalLen + 1);
-
-    /* Shift text after deletion point */
-    p = buf + start;
-    for (i = start + len; i <= totalLen; i++) {
-        *p++ = buf[i];
-    }
-
-    SetWindowTextW(s_hwndEdit, buf);
+    /* Prefer edit-control-native deletion to preserve viewport/caret context. */
+    SendMessageW(s_hwndEdit, EM_SETSEL, start, start + len);
+    SendMessageW(s_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"");
     SendMessageW(s_hwndEdit, EM_SETSEL, start, start);
-    LocalFree(buf);
 }
 
 /*
@@ -377,4 +382,20 @@ int Undo_CanUndo(void)
 int Undo_CanRedo(void)
 {
     return s_redoCount > 0;
+}
+
+void Undo_ShiftPositions(int delta)
+{
+    int i;
+    int count;
+
+    if (delta == 0) return;
+    count = s_undoCount + s_redoCount;
+    if (count > UNDO_MAX_ENTRIES) count = UNDO_MAX_ENTRIES;
+
+    for (i = 0; i < count; i++) {
+        int newPos = s_undoStack[i].pos + delta;
+        if (newPos < 0) newPos = 0;
+        s_undoStack[i].pos = newPos;
+    }
 }

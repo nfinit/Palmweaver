@@ -16,7 +16,7 @@
 
 #include <windows.h>
 
-/* Initialize undo system with target edit control */
+/* Initialize undo system; rebinding to a recreated edit control preserves history. */
 void Undo_Init(HWND hwndEdit);
 
 /* Cleanup and free resources */
@@ -51,5 +51,8 @@ void Undo_Clear(void);
 /* Query state for menu enable/disable */
 int Undo_CanUndo(void);
 int Undo_CanRedo(void);
+
+/* Shift recorded positions by delta (used when edit-local coordinates move). */
+void Undo_ShiftPositions(int delta);
 
 #endif /* UNDO_H */
