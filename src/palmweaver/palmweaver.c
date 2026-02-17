@@ -95,6 +95,8 @@ static int g_bMousePresent = 1;
 #define LINENUM_DIRTY_SCROLL     0x02
 #define LINENUM_DIRTY_LAYOUT     0x04
 #define PWM_EDIT_POSTJUMP_REPAINT (WM_APP + 0x45)
+#define PWM_IS_QUICKNOTE_WINDOW  (WM_APP + 0x46)
+#define PWM_QUICKNOTE_ACTIVATE   (WM_APP + 0x47)
 #define EDIT_TEXT_LIMIT          0x7FFFFFFE
 #define STATUS_TOTALS_INTERVAL_MS 350
 #define BUSY_TEXT_THRESHOLD      65535
@@ -130,6 +132,7 @@ int g_bShowColumnIndicator = 0;  /* Show visual column indicator (off by default
 int g_bQuickNoteStorage = 0;     /* Prefer storage card for quick notes */
 int g_bQuickNoteAutoInit = 0;    /* Auto-create Notes folder on card without prompt */
 static int s_bSkipStorageCard = 0;  /* Session flag: user chose device memory */
+static int g_bQuickNoteWindow = 0;  /* This process hosts dedicated Quick Note window */
 
 /* Font settings */
 static int g_fontSizes[] = {10, 12, 14, 16};
@@ -205,6 +208,12 @@ static int CaptureEditRangeText(HWND hwnd, DWORD start, DWORD end, wchar_t **out
 static void RecordUndoDeleteRange(HWND hwnd, DWORD start, DWORD end);
 static int IsLikelyTypingKey(UINT vk, int ctrl, int alt);
 static void CloseReplaceTypingGroup(void);
+static int CmdLineHasQuickNoteSwitch(const wchar_t *cmdLine);
+static HWND FindQuickNoteWindow(HWND hwndExclude);
+static void ActivateQuickNoteWindow(HWND hwnd, int appendNewline);
+static int LaunchQuickNoteWindowProcess(void);
+static void DoQuickNoteHotkey(void);
+static void QuickNoteAppendNewline(void);
 static void UpdateTheme(void);
 static void ApplySelectionColors(void);
 static void RestoreSelectionColors(void);
@@ -1251,6 +1260,128 @@ static void CloseReplaceTypingGroup(void)
     }
 }
 
+static void MemZero(void *ptr, DWORD bytes)
+{
+    BYTE *p = (BYTE *)ptr;
+    DWORD i;
+    if (!p) return;
+    for (i = 0; i < bytes; i++) p[i] = 0;
+}
+
+static int CmdLineHasQuickNoteSwitch(const wchar_t *cmdLine)
+{
+    const wchar_t *p;
+    wchar_t token[32];
+    int i;
+
+    if (!cmdLine) return 0;
+
+    p = cmdLine;
+    while (*p) {
+        while (*p == L' ' || *p == L'\t') p++;
+        if (!*p) break;
+
+        if (*p == L'"') {
+            p++;
+            while (*p && *p != L'"') p++;
+            if (*p == L'"') p++;
+            continue;
+        }
+
+        i = 0;
+        while (*p && *p != L' ' && *p != L'\t') {
+            if (i < (int)(sizeof(token) / sizeof(token[0])) - 1) {
+                token[i++] = *p;
+            }
+            p++;
+        }
+        token[i] = 0;
+
+        if (lstrcmpiW(token, L"/quicknote") == 0 ||
+            lstrcmpiW(token, L"-quicknote") == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static HWND FindQuickNoteWindow(HWND hwndExclude)
+{
+    HWND hwnd;
+    wchar_t className[32];
+
+    hwnd = FindWindowW(g_szClassName, NULL);
+    while (hwnd) {
+        if (hwnd != hwndExclude) {
+            if (SendMessageW(hwnd, PWM_IS_QUICKNOTE_WINDOW, 0, 0)) {
+                return hwnd;
+            }
+        }
+
+        do {
+            hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+            if (!hwnd) break;
+        } while (GetClassNameW(hwnd, className, 32) <= 0 || lstrcmpW(className, g_szClassName) != 0);
+    }
+
+    return NULL;
+}
+
+static void ActivateQuickNoteWindow(HWND hwnd, int appendNewline)
+{
+    if (!hwnd) return;
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+    SendMessageW(hwnd, PWM_QUICKNOTE_ACTIVATE, (WPARAM)(appendNewline ? 1 : 0), 0);
+}
+
+static int LaunchQuickNoteWindowProcess(void)
+{
+    wchar_t exePath[MAX_PATH];
+    wchar_t cmdLine[(MAX_PATH * 2) + 32];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    int started = 0;
+
+    if (!GetModuleFileNameW(NULL, exePath, MAX_PATH)) return 0;
+    wsprintfW(cmdLine, L"\"%s\" /quicknote", exePath);
+
+    MemZero(&si, sizeof(si));
+    MemZero(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+
+    if (CreateProcessW(exePath, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        started = 1;
+        if (pi.hThread) CloseHandle(pi.hThread);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+    }
+
+    return started;
+}
+
+static void DoQuickNoteHotkey(void)
+{
+    HWND hwndQuick;
+
+    if (g_bQuickNoteWindow) {
+        DoQuickNote();
+        return;
+    }
+
+    hwndQuick = FindQuickNoteWindow(g_hwndMain);
+    if (hwndQuick) {
+        ActivateQuickNoteWindow(hwndQuick, 1);
+        return;
+    }
+
+    if (LaunchQuickNoteWindowProcess()) return;
+
+    /* Fallback if process launch fails: keep existing in-window behavior. */
+    DoQuickNote();
+}
+
 /*
  * HandleGlobalKeys - Centralized keyboard handler for app-wide shortcuts.
  * Returns 1 if key was handled, 0 otherwise.
@@ -1314,7 +1445,7 @@ static int HandleGlobalKeys(UINT msg, WPARAM wParam)
         if (wParam == 'F') { DoFind(); return 1; }
         if (wParam == 'H') { DoReplace(); return 1; }
         if (wParam == 'R') { DoInsertRule(); return 1; }
-        if (wParam == 'Q') { DoQuickNote(); return 1; }
+        if (wParam == 'Q') { DoQuickNoteHotkey(); return 1; }
         if (wParam == 'J') { DoReflow(); return 1; }
         if (wParam == 'X' && shift) { SendMessage(g_hwndMain, WM_COMMAND, IDM_EDIT_CUTLINE, 0); return 1; }
         if (wParam == 'A') { SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1); return 1; }
@@ -1721,9 +1852,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     MSG msg;
     HDC hdc;
+    HWND hwndExistingQuick;
 
     (void)hPrevInstance;
-    (void)lpCmdLine;
+
+    g_bQuickNoteWindow = CmdLineHasQuickNoteSwitch(lpCmdLine);
+    if (g_bQuickNoteWindow) {
+        hwndExistingQuick = FindQuickNoteWindow(NULL);
+        if (hwndExistingQuick) {
+            ActivateQuickNoteWindow(hwndExistingQuick, 1);
+            return 0;
+        }
+    }
 
     /* Detect color vs grayscale display */
     hdc = GetDC(NULL);
@@ -1738,6 +1878,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (!InitInstance(hInstance, nCmdShow)) {
         return 1;
     }
+
+    if (g_bQuickNoteWindow) DoQuickNote();
 
     while (GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
@@ -4236,6 +4378,22 @@ static int DoFileSaveAs(void)
 }
 
 /*
+ * QuickNoteAppendNewline - Append entry separator in current quick-note window
+ * without reloading/changing the active file.
+ */
+static void QuickNoteAppendNewline(void)
+{
+    int len;
+
+    if (!g_hwndEdit) return;
+    len = GetWindowTextLengthW(g_hwndEdit);
+    SendMessageW(g_hwndEdit, EM_SETSEL, len, len);
+    SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
+    SetFocus(g_hwndEdit);
+    UpdateStatus();
+}
+
+/*
  * DoQuickNote - Open/create today's dated note file
  */
 static void DoQuickNote(void)
@@ -4352,6 +4510,17 @@ static void DoQuickNote(void)
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
+    case PWM_IS_QUICKNOTE_WINDOW:
+        return g_bQuickNoteWindow ? 1 : 0;
+
+    case PWM_QUICKNOTE_ACTIVATE:
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+        SetForegroundWindow(hwnd);
+        BringWindowToTop(hwnd);
+        if (wParam) QuickNoteAppendNewline();
+        if (g_hwndEdit) SetFocus(g_hwndEdit);
+        return 0;
+
     case WM_CREATE:
         {
             LOGFONTW lf = {0};
