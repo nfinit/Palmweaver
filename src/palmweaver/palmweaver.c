@@ -81,6 +81,8 @@ static int g_lineNumWidth = 20;
 static UINT g_lineNumDirtyFlags = 0;
 static int g_lineNumTimerActive = 0;
 static UINT g_lineNumTextSeq = 0;
+static int g_bForceImmediateLineNum = 0;
+static int g_lastEditLineCount = -1;
 static wchar_t *g_lineNumRenderBuf = NULL;
 static wchar_t *g_lineNumCachedOutput = NULL;
 static int g_lineNumBufCap = 0;
@@ -1748,6 +1750,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (msg == WM_CHAR && wParam == '\r') {
         DWORD selStart, selEnd;
         wchar_t ch[2];
+        g_bForceImmediateLineNum = 1;
         SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
         if (selEnd > selStart) {
             if (!g_bReplaceTypingGroupOpen) {
@@ -4415,6 +4418,7 @@ static void QuickNoteAppendNewline(void)
     len = GetWindowTextLengthW(g_hwndEdit);
     SendMessageW(g_hwndEdit, EM_SETSEL, len, len);
     if (len > 0 && !EditEndsWithNewline(g_hwndEdit)) {
+        g_bForceImmediateLineNum = 1;
         SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
     }
     SetFocus(g_hwndEdit);
@@ -4522,6 +4526,7 @@ static void DoQuickNote(void)
     g_bDirty = 0;
     UpdateTitle();
     QuickNoteAppendNewline();
+    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
 }
 
 /*
@@ -5066,6 +5071,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_EDIT:
             /* Edit control notification */
             if (HIWORD(wParam) == EN_CHANGE) {
+                int lineCountNow = (int)SendMessageW(g_hwndEdit, EM_GETLINECOUNT, 0, 0);
+                int lineStructureChanged = 0;
+                if (lineCountNow > 0) {
+                    if (g_lastEditLineCount >= 0 && lineCountNow != g_lastEditLineCount) {
+                        lineStructureChanged = 1;
+                    }
+                    g_lastEditLineCount = lineCountNow;
+                }
                 if (g_bPagedLoading) {
                     RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
                     return 0;
@@ -5077,7 +5090,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     UpdateTitle();
                 }
                 UpdateStatus();
-                RequestLineNumberRefresh(LINENUM_DIRTY_TEXT, 0);
+                if (g_bForceImmediateLineNum || lineStructureChanged) {
+                    g_bForceImmediateLineNum = 0;
+                    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
+                } else {
+                    RequestLineNumberRefresh(LINENUM_DIRTY_TEXT, 0);
+                }
                 if (g_bShowColumnIndicator) InvalidateColumnIndicator();
             }
             return 0;
