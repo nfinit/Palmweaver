@@ -213,6 +213,7 @@ static HWND FindQuickNoteWindow(HWND hwndExclude);
 static void ActivateQuickNoteWindow(HWND hwnd, int appendNewline);
 static int LaunchQuickNoteWindowProcess(void);
 static void DoQuickNoteHotkey(void);
+static int EditEndsWithNewline(HWND hwndEdit);
 static void QuickNoteAppendNewline(void);
 static void UpdateTheme(void);
 static void ApplySelectionColors(void);
@@ -4378,6 +4379,31 @@ static int DoFileSaveAs(void)
 }
 
 /*
+ * EditEndsWithNewline - Returns 1 when edit text already ends at a newline
+ * boundary (no extra separator needed).
+ */
+static int EditEndsWithNewline(HWND hwndEdit)
+{
+    int len;
+    int lineCount;
+    int lastLine;
+    int lastLineStart;
+
+    if (!hwndEdit) return 0;
+    len = GetWindowTextLengthW(hwndEdit);
+    if (len <= 0) return 0;
+
+    lineCount = (int)SendMessageW(hwndEdit, EM_GETLINECOUNT, 0, 0);
+    if (lineCount <= 0) return 0;
+
+    lastLine = lineCount - 1;
+    lastLineStart = (int)SendMessageW(hwndEdit, EM_LINEINDEX, lastLine, 0);
+    if (lastLineStart < 0) return 0;
+
+    return lastLineStart >= len;
+}
+
+/*
  * QuickNoteAppendNewline - Append entry separator in current quick-note window
  * without reloading/changing the active file.
  */
@@ -4388,7 +4414,9 @@ static void QuickNoteAppendNewline(void)
     if (!g_hwndEdit) return;
     len = GetWindowTextLengthW(g_hwndEdit);
     SendMessageW(g_hwndEdit, EM_SETSEL, len, len);
-    SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
+    if (len > 0 && !EditEndsWithNewline(g_hwndEdit)) {
+        SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
+    }
     SetFocus(g_hwndEdit);
     UpdateStatus();
 }
@@ -4493,15 +4521,7 @@ static void DoQuickNote(void)
     lstrcpyW(g_szFilePath, path);
     g_bDirty = 0;
     UpdateTitle();
-
-    /* Move cursor to end and add newline if content exists */
-    len = GetWindowTextLengthW(g_hwndEdit);
-    SendMessageW(g_hwndEdit, EM_SETSEL, len, len);
-    if (len > 0) {
-        SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)L"\r\n");
-    }
-    SetFocus(g_hwndEdit);
-    UpdateStatus();
+    QuickNoteAppendNewline();
 }
 
 /*
