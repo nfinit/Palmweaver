@@ -81,6 +81,9 @@ static int g_lineNumWidth = 20;
 static UINT g_lineNumDirtyFlags = 0;
 static int g_lineNumTimerActive = 0;
 static UINT g_lineNumTextSeq = 0;
+static wchar_t *g_lineNumRenderBuf = NULL;
+static wchar_t *g_lineNumCachedOutput = NULL;
+static int g_lineNumBufCap = 0;
 static UINT g_statusTotalsSeq = 1;
 static int g_busyDepth = 0;
 static int g_bMousePresent = 1;
@@ -191,6 +194,7 @@ static int EnsureFileIoByteBuffer(DWORD requiredBytes);
 static int EnsureFileIoWideBuffer(int requiredChars);
 static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen);
 static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len);
+static int EnsureLineNumBuffers(int requiredChars);
 static void MarkStatusTotalsDirty(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
@@ -452,6 +456,62 @@ static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len)
     for (i = 0; i < len; i++) owned[i] = text[i];
     owned[len] = 0;
     return owned;
+}
+
+static int EnsureLineNumBuffers(int requiredChars)
+{
+    int newCap;
+    int oldCap;
+    int copyCount;
+    wchar_t *newRender;
+    wchar_t *newCached;
+    int i;
+
+    if (requiredChars < 1) requiredChars = 1;
+    if (g_lineNumRenderBuf && g_lineNumCachedOutput && g_lineNumBufCap >= requiredChars) return 1;
+
+    oldCap = g_lineNumBufCap;
+    newCap = oldCap;
+    if (newCap < 4096) newCap = 4096;
+    while (newCap < requiredChars) {
+        if (newCap > 0x20000000) {
+            newCap = requiredChars;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    newRender = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+    if (!newRender) {
+        newCap = requiredChars;
+        newRender = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+        if (!newRender) return 0;
+    }
+
+    newCached = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+    if (!newCached) {
+        LocalFree(newRender);
+        return 0;
+    }
+
+    newCached[0] = 0;
+    if (g_lineNumCachedOutput && oldCap > 0) {
+        copyCount = oldCap;
+        if (copyCount > newCap) copyCount = newCap;
+        for (i = 0; i < copyCount; i++) {
+            newCached[i] = g_lineNumCachedOutput[i];
+            if (!g_lineNumCachedOutput[i]) break;
+        }
+        if (i >= copyCount) newCached[copyCount] = 0;
+    }
+    newRender[0] = 0;
+
+    if (g_lineNumRenderBuf) LocalFree(g_lineNumRenderBuf);
+    if (g_lineNumCachedOutput) LocalFree(g_lineNumCachedOutput);
+    g_lineNumRenderBuf = newRender;
+    g_lineNumCachedOutput = newCached;
+    g_lineNumBufCap = newCap;
+    return 1;
 }
 
 static void PagedReset(void)
@@ -3371,14 +3431,19 @@ static void UpdateLineNumbers(void)
     static int cachedLen = -1;
     static int cachedFirstVisible = -1;
     static int cachedVisLines = -1;
-    static wchar_t cachedOutput[4096] = {0};
-    wchar_t buf[4096];
+    static int cachedWrapMode = -1;
+    static HWND cachedEditHwnd = NULL;
+    wchar_t *cachedOutput;
+    wchar_t *buf;
     wchar_t *text = NULL;
     int i, visLines, firstVisible, pos = 0, textLen;
     int charIdx, logicalLine;
     int textChanged;
+    int wrapChanged;
+    int editRecreated;
     int logicalTotal = 1;
     int visibleRows, displayEnd;
+    int lineNumLimit;
     RECT rcEdit;
     int lineHeight = 0;
 
@@ -3388,13 +3453,25 @@ static void UpdateLineNumbers(void)
     textLen = GetWindowTextLengthW(g_hwndEdit);
     firstVisible = (int)SendMessage(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
     textChanged = (cachedTextSeq != g_lineNumTextSeq);
+    wrapChanged = (cachedWrapMode != g_bWordWrap);
+    editRecreated = (cachedEditHwnd != g_hwndEdit);
 
     /* Quick exit if scroll position unchanged and line count same */
     if (!textChanged &&
+        !wrapChanged &&
+        !editRecreated &&
         textLen == cachedLen &&
         firstVisible == cachedFirstVisible &&
         visLines == cachedVisLines)
         return;
+
+    if (!EnsureLineNumBuffers(4096)) return;
+    cachedWrapMode = g_bWordWrap;
+    cachedEditHwnd = g_hwndEdit;
+    buf = g_lineNumRenderBuf;
+    cachedOutput = g_lineNumCachedOutput;
+    lineNumLimit = g_lineNumBufCap - 16;
+    if (lineNumLimit < 1) lineNumLimit = 1;
 
     if (g_bPagedMode && g_pagedLineStarts && g_pagedLineCount > 0) {
         int globalIdx;
@@ -3460,7 +3537,7 @@ static void UpdateLineNumbers(void)
             if (logicalLine < 1) logicalLine = 1;
         }
 
-        for (i = firstVisible; i < displayEnd && pos < 4000; i++) {
+        for (i = firstVisible; i < displayEnd && pos < lineNumLimit; i++) {
             int isLogicalStart = 0;
 
             charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, i, 0);
@@ -3488,6 +3565,7 @@ static void UpdateLineNumbers(void)
                 pos += wsprintfW(buf + pos, L"\r\n");
             }
         }
+        if (pos >= g_lineNumBufCap) pos = g_lineNumBufCap - 1;
         buf[pos] = 0;
 
         if (lstrcmpW(buf, cachedOutput) != 0) {
@@ -3607,7 +3685,7 @@ static void UpdateLineNumbers(void)
     }
 
     /* Build line number text - blank for wrapped continuations */
-    for (i = firstVisible; i < displayEnd && pos < 4000; i++) {
+    for (i = firstVisible; i < displayEnd && pos < lineNumLimit; i++) {
         int isLogicalStart = 1;
 
         charIdx = (int)SendMessage(g_hwndEdit, EM_LINEINDEX, i, 0);
@@ -3640,6 +3718,7 @@ static void UpdateLineNumbers(void)
             pos += wsprintfW(buf + pos, L"\r\n");
         }
     }
+    if (pos >= g_lineNumBufCap) pos = g_lineNumBufCap - 1;
     buf[pos] = 0;
 
     /* Only update control if output changed */
@@ -4560,19 +4639,32 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDM_VIEW_WORDWRAP:
             {
                 /* Must recreate edit control to change word wrap on CE */
-                int textLen = GetWindowTextLengthW(g_hwndEdit);
+                int textLen = 0;
                 wchar_t *text = NULL;
                 DWORD editStyle;
                 int selStart, selEnd;
+                int wasPaged = g_bPagedMode;
                 int pagedCaretGlobal = 0;
 
                 /* Save text and selection */
-                if (textLen > 0) {
-                    text = (wchar_t *)LocalAlloc(LMEM_FIXED, (textLen + 1) * sizeof(wchar_t));
-                    if (text) GetWindowTextW(g_hwndEdit, text, textLen + 1);
-                }
                 SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-                if (g_bPagedMode) pagedCaretGlobal = g_pagedPageStart + selStart;
+                if (wasPaged) {
+                    pagedCaretGlobal = g_pagedPageStart + selStart;
+                    if (!PagedCommitPage()) {
+                        MessageBoxW(g_hwndMain, L"Cannot commit large-file page.", g_szAppTitle, MB_OK | MB_ICONERROR);
+                        return 0;
+                    }
+                } else {
+                    textLen = GetWindowTextLengthW(g_hwndEdit);
+                    if (textLen > 0) {
+                        text = (wchar_t *)LocalAlloc(LMEM_FIXED, (textLen + 1) * sizeof(wchar_t));
+                        if (!text) {
+                            MessageBoxW(g_hwndMain, L"Out of memory.", g_szAppTitle, MB_OK | MB_ICONERROR);
+                            return 0;
+                        }
+                        GetWindowTextW(g_hwndEdit, text, textLen + 1);
+                    }
+                }
 
                 g_bWordWrap = !g_bWordWrap;
                 CheckMenuItem(g_hViewMenu, IDM_VIEW_WORDWRAP,
@@ -4600,22 +4692,29 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 /* Re-init undo with new edit control (preserves history) */
                 Undo_Init(g_hwndEdit);
 
+                /* Size recreated controls before restoring content/selection. */
+                SendMessage(hwnd, WM_SIZE, 0, 0);
+
                 /* Restore text and selection */
-                if (text) {
-                    SetWindowTextW(g_hwndEdit, text);
-                    LocalFree(text);
-                }
-                if (g_bPagedMode) {
+                if (wasPaged) {
                     if (!PagedLoadWindowAt(pagedCaretGlobal)) {
                         SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
                     }
                 } else {
+                    if (text) {
+                        SetWindowTextW(g_hwndEdit, text);
+                        LocalFree(text);
+                    }
                     SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
                 }
 
-                SendMessage(hwnd, WM_SIZE, 0, 0);
-                RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT, 1);
+                if (!g_bWordWrap) {
+                    /* Reset horizontal scroll baseline after recreating no-wrap edit control. */
+                    SendMessageW(g_hwndEdit, EM_LINESCROLL, (WPARAM)-32767, 0);
+                }
                 SetFocus(g_hwndEdit);
+                SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+                RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT | LINENUM_DIRTY_SCROLL, 1);
             }
             return 0;
 
@@ -4815,6 +4914,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_hBrushBg) DeleteObject(g_hBrushBg);
         if (g_hBrushColInd) DeleteObject(g_hBrushColInd);
         if (g_hFont) DeleteObject(g_hFont);
+        if (g_lineNumRenderBuf) {
+            LocalFree(g_lineNumRenderBuf);
+            g_lineNumRenderBuf = NULL;
+        }
+        if (g_lineNumCachedOutput) {
+            LocalFree(g_lineNumCachedOutput);
+            g_lineNumCachedOutput = NULL;
+        }
+        g_lineNumBufCap = 0;
         CommandBar_Destroy(g_hwndCB);
         PostQuitMessage(0);
         return 0;
