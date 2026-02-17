@@ -20,6 +20,7 @@ typedef struct {
     int type;           /* UNDO_INSERT or UNDO_DELETE */
     int pos;            /* Character position */
     int len;            /* Text length */
+    int cap;            /* Allocated wchar capacity (including null) */
     int group;          /* 0 = standalone, non-zero = grouped with adjacent ops */
     wchar_t *text;      /* Allocated text buffer */
 } UndoEntry;
@@ -35,6 +36,7 @@ static int s_nextGroupId = 1;
 
 /* Forward declaration */
 static void DeleteRange(int start, int len);
+static int EnsureEntryCapacity(UndoEntry *e, int requiredChars);
 
 /*
  * Free a single entry's text buffer
@@ -46,7 +48,55 @@ static void FreeEntry(UndoEntry *e)
         e->text = NULL;
     }
     e->len = 0;
+    e->cap = 0;
     e->group = 0;
+}
+
+static int EnsureEntryCapacity(UndoEntry *e, int requiredChars)
+{
+    int newCap;
+    wchar_t *newText;
+    int i;
+
+    if (!e) return 0;
+    if (requiredChars < 1) requiredChars = 1;
+    if (requiredChars > UNDO_MAX_TEXT + 1) requiredChars = UNDO_MAX_TEXT + 1;
+
+    if (e->text && e->cap >= requiredChars) return 1;
+
+    newCap = e->cap;
+    if (newCap < 16) newCap = 16;
+    while (newCap < requiredChars) {
+        if (newCap > (UNDO_MAX_TEXT + 1) / 2) {
+            newCap = requiredChars;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    if (newCap > UNDO_MAX_TEXT + 1) newCap = UNDO_MAX_TEXT + 1;
+    if (newCap < requiredChars) return 0;
+
+    newText = (wchar_t *)LocalAlloc(LMEM_FIXED, newCap * sizeof(wchar_t));
+    if (!newText) {
+        newCap = requiredChars;
+        newText = (wchar_t *)LocalAlloc(LMEM_FIXED, newCap * sizeof(wchar_t));
+        if (!newText) return 0;
+    }
+
+    if (e->text && e->len > 0) {
+        int copyLen = e->len;
+        if (copyLen > newCap - 1) copyLen = newCap - 1;
+        for (i = 0; i < copyLen; i++) newText[i] = e->text[i];
+        newText[copyLen] = 0;
+    } else {
+        newText[0] = 0;
+    }
+
+    if (e->text) LocalFree(e->text);
+    e->text = newText;
+    e->cap = newCap;
+    return 1;
 }
 
 static void ApplyUndoEntry(UndoEntry *e)
@@ -85,6 +135,7 @@ void Undo_Init(HWND hwndEdit)
     for (i = 0; i < UNDO_MAX_ENTRIES; i++) {
         s_undoStack[i].text = NULL;
         s_undoStack[i].len = 0;
+        s_undoStack[i].cap = 0;
         s_undoStack[i].group = 0;
     }
     s_groupDepth = 0;
@@ -168,14 +219,10 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
         if (e->group == currentGroup &&
             type == UNDO_INSERT && e->type == UNDO_INSERT &&
             pos == e->pos + e->len && e->len < UNDO_MAX_TEXT) {
-            wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
-            if (newText) {
-                for (i = 0; i < e->len; i++) newText[i] = e->text[i];
-                newText[e->len] = text[0];
-                newText[e->len + 1] = 0;
-                LocalFree(e->text);
-                e->text = newText;
+            if (EnsureEntryCapacity(e, e->len + 2)) {
+                e->text[e->len] = text[0];
                 e->len++;
+                e->text[e->len] = 0;
                 return;
             }
         }
@@ -184,13 +231,9 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
         if (e->group == currentGroup &&
             type == UNDO_DELETE && e->type == UNDO_DELETE &&
             pos == e->pos - 1 && e->len < UNDO_MAX_TEXT) {
-            wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
-            if (newText) {
-                newText[0] = text[0];
-                for (i = 0; i < e->len; i++) newText[i + 1] = e->text[i];
-                newText[e->len + 1] = 0;
-                LocalFree(e->text);
-                e->text = newText;
+            if (EnsureEntryCapacity(e, e->len + 2)) {
+                for (i = e->len; i >= 0; i--) e->text[i + 1] = e->text[i];
+                e->text[0] = text[0];
                 e->pos = pos;
                 e->len++;
                 return;
@@ -201,14 +244,10 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
         if (e->group == currentGroup &&
             type == UNDO_DELETE && e->type == UNDO_DELETE &&
             pos == e->pos && e->len < UNDO_MAX_TEXT) {
-            wchar_t *newText = (wchar_t *)LocalAlloc(LMEM_FIXED, (e->len + 2) * sizeof(wchar_t));
-            if (newText) {
-                for (i = 0; i < e->len; i++) newText[i] = e->text[i];
-                newText[e->len] = text[0];
-                newText[e->len + 1] = 0;
-                LocalFree(e->text);
-                e->text = newText;
+            if (EnsureEntryCapacity(e, e->len + 2)) {
+                e->text[e->len] = text[0];
                 e->len++;
+                e->text[e->len] = 0;
                 return;
             }
         }
@@ -227,12 +266,12 @@ void Undo_Record(int type, int pos, const wchar_t *text, int len)
     /* Add new entry */
     e = &s_undoStack[s_undoCount];
     FreeEntry(e);  /* Free any existing data at this slot */
+    if (!EnsureEntryCapacity(e, len + 1)) return;
     e->type = type;
     e->pos = pos;
-    e->len = len;
     e->group = currentGroup;
-    e->text = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    if (e->text) {
+    e->len = len;
+    {
         int j;
         for (j = 0; j < len; j++) e->text[j] = text[j];
         e->text[len] = 0;
