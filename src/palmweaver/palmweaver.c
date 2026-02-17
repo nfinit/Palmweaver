@@ -4645,11 +4645,22 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 int selStart, selEnd;
                 int wasPaged = g_bPagedMode;
                 int pagedCaretGlobal = 0;
+                int savedFirstVisible;
+                int savedTopChar;
+                int savedTopGlobal;
+                int targetTopLine = -1;
+                int curFirst;
+                int restoredTop = 0;
 
                 /* Save text and selection */
                 SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+                savedFirstVisible = (int)SendMessageW(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+                savedTopChar = (int)SendMessageW(g_hwndEdit, EM_LINEINDEX, savedFirstVisible, 0);
+                if (savedTopChar < 0) savedTopChar = 0;
+                savedTopGlobal = savedTopChar;
                 if (wasPaged) {
                     pagedCaretGlobal = g_pagedPageStart + selStart;
+                    savedTopGlobal = g_pagedPageStart + savedTopChar;
                     if (!PagedCommitPage()) {
                         MessageBoxW(g_hwndMain, L"Cannot commit large-file page.", g_szAppTitle, MB_OK | MB_ICONERROR);
                         return 0;
@@ -4700,12 +4711,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     if (!PagedLoadWindowAt(pagedCaretGlobal)) {
                         SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
                     }
+                    {
+                        int targetTopLocal = savedTopGlobal - g_pagedPageStart;
+                        if (targetTopLocal < 0) targetTopLocal = 0;
+                        if (targetTopLocal > g_pagedPageLen) targetTopLocal = g_pagedPageLen;
+                        targetTopLine = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, targetTopLocal, 0);
+                    }
                 } else {
                     if (text) {
                         SetWindowTextW(g_hwndEdit, text);
                         LocalFree(text);
                     }
                     SendMessageW(g_hwndEdit, EM_SETSEL, selStart, selEnd);
+                    targetTopLine = (int)SendMessageW(g_hwndEdit, EM_LINEFROMCHAR, savedTopChar, 0);
                 }
 
                 if (!g_bWordWrap) {
@@ -4713,7 +4731,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     SendMessageW(g_hwndEdit, EM_LINESCROLL, (WPARAM)-32767, 0);
                 }
                 SetFocus(g_hwndEdit);
-                SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+                if (targetTopLine >= 0) {
+                    curFirst = (int)SendMessageW(g_hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+                    if (curFirst != targetTopLine) {
+                        SendMessageW(g_hwndEdit, EM_LINESCROLL, 0, targetTopLine - curFirst);
+                    }
+                    restoredTop = 1;
+                }
+                if (!restoredTop) SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
                 RequestLineNumberRefresh(LINENUM_DIRTY_LAYOUT | LINENUM_DIRTY_SCROLL, 1);
             }
             return 0;
