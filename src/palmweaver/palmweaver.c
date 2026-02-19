@@ -103,6 +103,7 @@ static int g_bMousePresent = 1;
 #define STATUS_TOTALS_INTERVAL_MS 350
 #define BUSY_TEXT_THRESHOLD      65535
 #define FILE_LOAD_MAX_BYTES      (2UL * 1024UL * 1024UL)
+#define FILE_IO_READ_CHUNK       4096
 #define PAGED_MODE_THRESHOLD_CHARS 60000
 #define PAGED_WINDOW_CHARS_NOWRAP 49152
 #define PAGED_WINDOW_CHARS_WRAP   16384
@@ -197,7 +198,6 @@ static void EndBusyCursor(const wchar_t *tag);
 static void ForceIdleCursor(void);
 static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel);
 static int EnsureFileIoByteBuffer(DWORD requiredBytes);
-static int EnsureFileIoWideBuffer(int requiredChars);
 static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen);
 static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len);
 static int EnsureLineNumBuffers(int requiredChars);
@@ -370,12 +370,14 @@ static int EnsureFileIoByteBuffer(DWORD requiredBytes)
     return 1;
 }
 
-static int EnsureFileIoWideBuffer(int requiredChars)
+static int EnsureFileIoWideBufferAppend(int requiredChars, int keepChars)
 {
     int newCap;
     wchar_t *newBuf;
+    int i;
 
     if (requiredChars < 1) requiredChars = 1;
+    if (keepChars < 0) keepChars = 0;
     if (g_fileIoWideBuf && g_fileIoWideCap >= requiredChars) return 1;
 
     newCap = g_fileIoWideCap;
@@ -395,6 +397,12 @@ static int EnsureFileIoWideBuffer(int requiredChars)
         if (!newBuf) return 0;
     }
 
+    if (g_fileIoWideBuf && keepChars > 0) {
+        if (keepChars > newCap) keepChars = newCap;
+        for (i = 0; i < keepChars; i++) newBuf[i] = g_fileIoWideBuf[i];
+    }
+    if (keepChars <= newCap) newBuf[keepChars] = 0;
+
     if (g_fileIoWideBuf) LocalFree(g_fileIoWideBuf);
     g_fileIoWideBuf = newBuf;
     g_fileIoWideCap = newCap;
@@ -404,53 +412,130 @@ static int EnsureFileIoWideBuffer(int requiredChars)
 static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen)
 {
     DWORD dwRead = 0;
-    int i;
+    DWORD bytesRemaining = 0;
+    DWORD toRead = 0;
+    unsigned char bom[2];
+    unsigned char *uBuf;
     int textLen = 0;
-    int nChars = 0;
-    wchar_t *pWide = NULL;
+    int i;
+    int isUtf16 = 0;
+    int pendingUtf16Lo = -1;
+    int carryByte = -1;
+    int chunkBytes;
+    int readOffset;
+    int needChars;
+    int converted;
 
     if (!outText || !outLen || hFile == INVALID_HANDLE_VALUE) return 0;
     *outText = NULL;
     *outLen = 0;
 
-    if (!EnsureFileIoByteBuffer(fileSize + 2)) return 0;
-    if (!ReadFile(hFile, g_fileIoByteBuf, fileSize, &dwRead, NULL)) return 0;
+    if (!EnsureFileIoByteBuffer(FILE_IO_READ_CHUNK + 4)) return 0;
+    if (!EnsureFileIoWideBufferAppend(4096, 0)) return 0;
+    uBuf = (unsigned char *)g_fileIoByteBuf;
 
-    g_fileIoByteBuf[dwRead] = 0;
-    g_fileIoByteBuf[dwRead + 1] = 0;
-
-    if (dwRead >= 2 &&
-        (unsigned char)g_fileIoByteBuf[0] == 0xFF &&
-        (unsigned char)g_fileIoByteBuf[1] == 0xFE) {
-        nChars = (int)((dwRead - 2) / sizeof(wchar_t));
-        if (!EnsureFileIoWideBuffer(nChars + 1)) return 0;
-        pWide = (wchar_t *)(g_fileIoByteBuf + 2);
-        for (i = 0; i < nChars; i++) g_fileIoWideBuf[i] = pWide[i];
-        g_fileIoWideBuf[nChars] = 0;
-        textLen = nChars;
+    if (fileSize >= 2) {
+        if (!ReadFile(hFile, bom, 2, &dwRead, NULL)) return 0;
+        if (dwRead == 2 && bom[0] == 0xFF && bom[1] == 0xFE) {
+            isUtf16 = 1;
+            bytesRemaining = fileSize - 2;
+        } else {
+            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+            bytesRemaining = fileSize;
+        }
     } else {
-        int converted = 0;
-        int needChars = 0;
+        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+        bytesRemaining = fileSize;
+    }
 
-        /* Prefer system ACP conversion when available; fall back to byte widening on CE variants. */
-        needChars = MultiByteToWideChar(CP_ACP, 0, g_fileIoByteBuf, (int)dwRead, NULL, 0);
-        if (needChars > 0) {
-            if (!EnsureFileIoWideBuffer(needChars + 1)) return 0;
-            converted = MultiByteToWideChar(CP_ACP, 0, g_fileIoByteBuf, (int)dwRead, g_fileIoWideBuf, needChars);
+    if (isUtf16) {
+        int expectedChars = (int)(bytesRemaining / 2) + 2;
+        if (!EnsureFileIoWideBufferAppend(expectedChars, 0)) return 0;
+
+        while (bytesRemaining > 0) {
+            toRead = bytesRemaining;
+            if (toRead > FILE_IO_READ_CHUNK) toRead = FILE_IO_READ_CHUNK;
+            if (!ReadFile(hFile, g_fileIoByteBuf, toRead, &dwRead, NULL)) return 0;
+            if (dwRead == 0) break;
+            bytesRemaining -= dwRead;
+
+            for (i = 0; i < (int)dwRead; i++) {
+                if (pendingUtf16Lo < 0) {
+                    pendingUtf16Lo = (int)uBuf[i];
+                } else {
+                    if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
+                    g_fileIoWideBuf[textLen++] = (wchar_t)(pendingUtf16Lo | ((int)uBuf[i] << 8));
+                    pendingUtf16Lo = -1;
+                }
+            }
         }
 
-        if (converted > 0) {
-            g_fileIoWideBuf[converted] = 0;
-            textLen = converted;
-        } else {
-            if (!EnsureFileIoWideBuffer((int)dwRead + 1)) return 0;
-            for (i = 0; i < (int)dwRead; i++)
-                g_fileIoWideBuf[i] = (wchar_t)(unsigned char)g_fileIoByteBuf[i];
-            g_fileIoWideBuf[dwRead] = 0;
-            textLen = (int)dwRead;
+        if (pendingUtf16Lo >= 0) {
+            if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
+            g_fileIoWideBuf[textLen++] = (wchar_t)pendingUtf16Lo;
+        }
+    } else {
+        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+        bytesRemaining = fileSize;
+        if (!EnsureFileIoWideBufferAppend((int)fileSize + 2, 0)) return 0;
+
+        while (bytesRemaining > 0) {
+            readOffset = (carryByte >= 0) ? 1 : 0;
+            if (readOffset) uBuf[0] = (unsigned char)carryByte;
+
+            toRead = bytesRemaining;
+            if (toRead > (DWORD)(FILE_IO_READ_CHUNK - readOffset)) {
+                toRead = (DWORD)(FILE_IO_READ_CHUNK - readOffset);
+            }
+
+            if (!ReadFile(hFile, g_fileIoByteBuf + readOffset, toRead, &dwRead, NULL)) return 0;
+            if (dwRead == 0) break;
+            bytesRemaining -= dwRead;
+
+            chunkBytes = (int)dwRead + readOffset;
+            carryByte = -1;
+
+            /* Prefer ACP conversion in-place; retry with one-byte carry on boundary failures. */
+            needChars = MultiByteToWideChar(CP_ACP, 0, g_fileIoByteBuf, chunkBytes, NULL, 0);
+            if (needChars <= 0 && chunkBytes > 1 && bytesRemaining > 0) {
+                needChars = MultiByteToWideChar(CP_ACP, 0, g_fileIoByteBuf, chunkBytes - 1, NULL, 0);
+                if (needChars > 0) {
+                    if (!EnsureFileIoWideBufferAppend(textLen + needChars + 1, textLen)) return 0;
+                    converted = MultiByteToWideChar(
+                        CP_ACP, 0, g_fileIoByteBuf, chunkBytes - 1, g_fileIoWideBuf + textLen, needChars);
+                    if (converted > 0) {
+                        textLen += converted;
+                        carryByte = (int)uBuf[chunkBytes - 1];
+                        continue;
+                    }
+                    needChars = 0;
+                }
+            }
+
+            if (needChars > 0) {
+                if (!EnsureFileIoWideBufferAppend(textLen + needChars + 1, textLen)) return 0;
+                converted = MultiByteToWideChar(
+                    CP_ACP, 0, g_fileIoByteBuf, chunkBytes, g_fileIoWideBuf + textLen, needChars);
+                if (converted > 0) {
+                    textLen += converted;
+                    continue;
+                }
+            }
+
+            if (!EnsureFileIoWideBufferAppend(textLen + chunkBytes + 1, textLen)) return 0;
+            for (i = 0; i < chunkBytes; i++) {
+                g_fileIoWideBuf[textLen++] = (wchar_t)uBuf[i];
+            }
+        }
+
+        if (carryByte >= 0) {
+            if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
+            g_fileIoWideBuf[textLen++] = (wchar_t)carryByte;
         }
     }
 
+    if (!EnsureFileIoWideBufferAppend(textLen + 1, textLen)) return 0;
+    g_fileIoWideBuf[textLen] = 0;
     *outText = g_fileIoWideBuf;
     *outLen = textLen;
     return 1;
