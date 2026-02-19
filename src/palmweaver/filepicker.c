@@ -118,32 +118,88 @@ static void PopulateFilterCombo(const wchar_t *filter)
 ** Populate file list for current directory
 **============================================================================*/
 
-#define MAX_ENTRIES 256
+static int EnsureEntryCapacity(wchar_t **entries, int *capacity, int required, int keepCount)
+{
+    int newCap;
+    int i;
+    int copyChars;
+    wchar_t *newEntries;
 
-static void SortAndAdd(wchar_t entries[][MAX_PATH], int count, int bracket)
+    if (!entries || !capacity) return 0;
+    if (required <= *capacity) return 1;
+
+    newCap = *capacity;
+    if (newCap < 64) newCap = 64;
+    while (newCap < required) {
+        if (newCap > 16384) {
+            newCap = required;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    newEntries = (wchar_t *)LocalAlloc(LMEM_FIXED, newCap * MAX_PATH * sizeof(wchar_t));
+    if (!newEntries) return 0;
+
+    if (*entries && keepCount > 0) {
+        copyChars = keepCount * MAX_PATH;
+        for (i = 0; i < copyChars; i++) newEntries[i] = (*entries)[i];
+    }
+    if (*entries) LocalFree(*entries);
+
+    *entries = newEntries;
+    *capacity = newCap;
+    return 1;
+}
+
+static int EntryListAdd(wchar_t **entries, int *count, int *capacity, const wchar_t *name)
+{
+    int i;
+    wchar_t *slot;
+
+    if (!entries || !count || !capacity || !name) return 0;
+    if (!EnsureEntryCapacity(entries, capacity, *count + 1, *count)) return 0;
+
+    slot = (*entries) + ((*count) * MAX_PATH);
+    for (i = 0; i < MAX_PATH - 1 && name[i]; i++) slot[i] = name[i];
+    slot[i] = 0;
+    (*count)++;
+    return 1;
+}
+
+static void SortAndAdd(wchar_t *entries, int count, int bracket)
 {
     int i, j;
     wchar_t temp[MAX_PATH];
+    wchar_t *cur;
+    wchar_t *prev;
+    wchar_t *dst;
 
     /* Simple insertion sort */
     for (i = 1; i < count; i++) {
-        lstrcpyW(temp, entries[i]);
+        cur = entries + (i * MAX_PATH);
+        lstrcpyW(temp, cur);
         j = i - 1;
-        while (j >= 0 && lstrcmpiW(entries[j], temp) > 0) {
-            lstrcpyW(entries[j + 1], entries[j]);
+        while (j >= 0) {
+            prev = entries + (j * MAX_PATH);
+            if (lstrcmpiW(prev, temp) <= 0) break;
+            dst = entries + ((j + 1) * MAX_PATH);
+            lstrcpyW(dst, prev);
             j--;
         }
-        lstrcpyW(entries[j + 1], temp);
+        dst = entries + ((j + 1) * MAX_PATH);
+        lstrcpyW(dst, temp);
     }
 
     /* Add to listbox */
     for (i = 0; i < count; i++) {
+        cur = entries + (i * MAX_PATH);
         if (bracket) {
             wchar_t item[MAX_PATH];
-            wsprintfW(item, L"[%s]", entries[i]);
+            wsprintfW(item, L"[%s]", cur);
             SendMessageW(g_hwndList, LB_ADDSTRING, 0, (LPARAM)item);
         } else {
-            SendMessageW(g_hwndList, LB_ADDSTRING, 0, (LPARAM)entries[i]);
+            SendMessageW(g_hwndList, LB_ADDSTRING, 0, (LPARAM)cur);
         }
     }
 }
@@ -155,8 +211,10 @@ static void PopulateFileList(void)
     wchar_t pattern[MAX_PATH];
     wchar_t ext[32];
     int atRoot;
-    static wchar_t entries[MAX_ENTRIES][MAX_PATH];
+    wchar_t *entries = NULL;
+    int capacity = 0;
     int count;
+    int outOfMemory = 0;
 
     g_typeAheadLen = 0;
     g_typeAhead[0] = 0;
@@ -185,8 +243,11 @@ static void PopulateFileList(void)
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
             if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                fd.cFileName[0] != L'.' && count < MAX_ENTRIES) {
-                lstrcpyW(entries[count++], fd.cFileName);
+                fd.cFileName[0] != L'.') {
+                if (!EntryListAdd(&entries, &count, &capacity, fd.cFileName)) {
+                    outOfMemory = 1;
+                    break;
+                }
             }
         } while (FindNextFileW(hFind, &fd));
         FindClose(hFind);
@@ -213,14 +274,25 @@ static void PopulateFileList(void)
     hFind = FindFirstFileW(pattern, &fd);
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                count < MAX_ENTRIES) {
-                lstrcpyW(entries[count++], fd.cFileName);
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                if (!EntryListAdd(&entries, &count, &capacity, fd.cFileName)) {
+                    outOfMemory = 1;
+                    break;
+                }
             }
         } while (FindNextFileW(hFind, &fd));
         FindClose(hFind);
     }
     SortAndAdd(entries, count, 0);
+
+    if (entries) LocalFree(entries);
+
+    if (outOfMemory) {
+        MessageBoxW(g_hwndPicker,
+            L"Directory listing truncated due to low memory.",
+            L"Palmweaver",
+            MB_OK | MB_ICONEXCLAMATION);
+    }
 
     SetWindowTextW(g_hwndPath, g_pickerDir);
 
