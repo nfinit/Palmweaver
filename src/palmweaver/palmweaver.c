@@ -67,6 +67,7 @@ HMENU g_hRecentMenu;
 /* Current file state */
 static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
+static int g_fileNewlineStyle = 1; /* 1=CRLF, 2=LF, 3=CR, 4=mixed, 5=none/unknown */
 int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 int g_bShowStatusBar = 1; /* Status bar on by default */
@@ -104,6 +105,11 @@ static int g_bMousePresent = 1;
 #define BUSY_TEXT_THRESHOLD      65535
 #define FILE_LOAD_MAX_BYTES      (2UL * 1024UL * 1024UL)
 #define FILE_IO_READ_CHUNK       4096
+#define NEWLINE_STYLE_CRLF       1
+#define NEWLINE_STYLE_LF         2
+#define NEWLINE_STYLE_CR         3
+#define NEWLINE_STYLE_MIXED      4
+#define NEWLINE_STYLE_NONE       5
 #define PAGED_MODE_THRESHOLD_CHARS 60000
 #define PAGED_WINDOW_CHARS_NOWRAP 49152
 #define PAGED_WINDOW_CHARS_WRAP   16384
@@ -199,7 +205,10 @@ static void ForceIdleCursor(void);
 static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel);
 static int EnsureFileIoByteBuffer(DWORD requiredBytes);
 static int IsLikelyUtf8NoBom(HANDLE hFile, DWORD fileSize);
-static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen);
+static int DetectNewlineStyle(const wchar_t *text, int len, int *outNeedsNormalize);
+static int NormalizeScratchNewlinesToCrLf(int *inOutLen);
+static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen, int *outNewlineStyle);
+static int WriteWideTextWithStyle(HANDLE hFile, const wchar_t *text, DWORD len, int newlineStyle);
 static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len);
 static int EnsureLineNumBuffers(int requiredChars);
 static void MarkStatusTotalsDirty(void);
@@ -506,7 +515,94 @@ static int IsLikelyUtf8NoBom(HANDLE hFile, DWORD fileSize)
     return (utf8SeqCount > 0) ? 1 : 0;
 }
 
-static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen)
+static int DetectNewlineStyle(const wchar_t *text, int len, int *outNeedsNormalize)
+{
+    int crlfCount = 0;
+    int loneLfCount = 0;
+    int loneCrCount = 0;
+    int i;
+
+    if (outNeedsNormalize) *outNeedsNormalize = 0;
+    if (!text || len <= 0) return NEWLINE_STYLE_NONE;
+
+    for (i = 0; i < len; i++) {
+        if (text[i] == L'\r') {
+            if (i + 1 < len && text[i + 1] == L'\n') {
+                crlfCount++;
+                i++;
+            } else {
+                loneCrCount++;
+            }
+        } else if (text[i] == L'\n') {
+            loneLfCount++;
+        }
+    }
+
+    if (outNeedsNormalize) {
+        if (loneLfCount > 0 || loneCrCount > 0) *outNeedsNormalize = 1;
+    }
+
+    if (crlfCount > 0 && loneLfCount == 0 && loneCrCount == 0) return NEWLINE_STYLE_CRLF;
+    if (loneLfCount > 0 && crlfCount == 0 && loneCrCount == 0) return NEWLINE_STYLE_LF;
+    if (loneCrCount > 0 && crlfCount == 0 && loneLfCount == 0) return NEWLINE_STYLE_CR;
+    if (crlfCount == 0 && loneLfCount == 0 && loneCrCount == 0) return NEWLINE_STYLE_NONE;
+    return NEWLINE_STYLE_MIXED;
+}
+
+static int NormalizeScratchNewlinesToCrLf(int *inOutLen)
+{
+    int srcLen;
+    int dstLen;
+    int srcPos;
+    int dstPos;
+
+    if (!inOutLen || !g_fileIoWideBuf) return 0;
+    srcLen = *inOutLen;
+    if (srcLen <= 0) return 1;
+
+    dstLen = srcLen;
+    for (srcPos = 0; srcPos < srcLen; srcPos++) {
+        if (g_fileIoWideBuf[srcPos] == L'\r') {
+            if (srcPos + 1 < srcLen && g_fileIoWideBuf[srcPos + 1] == L'\n') {
+                srcPos++;
+            } else {
+                dstLen++;
+            }
+        } else if (g_fileIoWideBuf[srcPos] == L'\n') {
+            dstLen++;
+        }
+    }
+
+    if (dstLen == srcLen) return 1;
+    if (!EnsureFileIoWideBufferAppend(dstLen + 1, srcLen)) return 0;
+
+    srcPos = srcLen - 1;
+    dstPos = dstLen - 1;
+    while (srcPos >= 0) {
+        if (g_fileIoWideBuf[srcPos] == L'\n') {
+            if (srcPos > 0 && g_fileIoWideBuf[srcPos - 1] == L'\r') {
+                g_fileIoWideBuf[dstPos--] = L'\n';
+                g_fileIoWideBuf[dstPos--] = L'\r';
+                srcPos -= 2;
+            } else {
+                g_fileIoWideBuf[dstPos--] = L'\n';
+                g_fileIoWideBuf[dstPos--] = L'\r';
+                srcPos--;
+            }
+        } else if (g_fileIoWideBuf[srcPos] == L'\r') {
+            g_fileIoWideBuf[dstPos--] = L'\n';
+            g_fileIoWideBuf[dstPos--] = L'\r';
+            srcPos--;
+        } else {
+            g_fileIoWideBuf[dstPos--] = g_fileIoWideBuf[srcPos--];
+        }
+    }
+
+    *inOutLen = dstLen;
+    return 1;
+}
+
+static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen, int *outNewlineStyle)
 {
     DWORD dwRead = 0;
     DWORD bytesRemaining = 0;
@@ -533,10 +629,13 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
     int valid;
     unsigned long cp;
     int j;
+    int newlineStyle;
+    int needsNormalize;
 
     if (!outText || !outLen || hFile == INVALID_HANDLE_VALUE) return 0;
     *outText = NULL;
     *outLen = 0;
+    if (outNewlineStyle) *outNewlineStyle = NEWLINE_STYLE_CRLF;
 
     if (!EnsureFileIoByteBuffer(FILE_IO_READ_CHUNK + 4)) return 0;
     if (!EnsureFileIoWideBufferAppend(4096, 0)) return 0;
@@ -749,10 +848,16 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
         }
     }
 
+    newlineStyle = DetectNewlineStyle(g_fileIoWideBuf, textLen, &needsNormalize);
+    if (needsNormalize) {
+        if (!NormalizeScratchNewlinesToCrLf(&textLen)) return 0;
+    }
+
     if (!EnsureFileIoWideBufferAppend(textLen + 1, textLen)) return 0;
     g_fileIoWideBuf[textLen] = 0;
     *outText = g_fileIoWideBuf;
     *outLen = textLen;
+    if (outNewlineStyle) *outNewlineStyle = newlineStyle;
     return 1;
 }
 
@@ -4262,7 +4367,7 @@ static void OpenRecentFile(int index)
         BeginBusyCursor(L"openrecent");
         busy = 1;
     }
-    if (!ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &textLen)) {
+    if (!ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &textLen, &g_fileNewlineStyle)) {
         CloseHandle(hFile);
         if (busy) {
             EndBusyCursor(L"openrecent");
@@ -4505,6 +4610,7 @@ static void DoFileNew(void)
     PagedReset();
     SetWindowTextW(g_hwndEdit, L"");
     g_szFilePath[0] = 0;
+    g_fileNewlineStyle = NEWLINE_STYLE_CRLF;
     g_bDirty = 0;
     Undo_Clear();
     UpdateTitle();
@@ -4547,7 +4653,7 @@ static int DoFileOpen(void)
         BeginBusyCursor(L"open");
         busy = 1;
     }
-    if (!ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &textLen)) {
+    if (!ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &textLen, &g_fileNewlineStyle)) {
         CloseHandle(hFile);
         if (busy) {
             EndBusyCursor(L"open");
@@ -4595,6 +4701,62 @@ static int DoFileOpen(void)
     return 1;
 }
 
+static int WriteWideTextWithStyle(HANDLE hFile, const wchar_t *text, DWORD len, int newlineStyle)
+{
+    DWORD i;
+    DWORD dwWritten;
+    DWORD bytesToWrite;
+    int outCount;
+    wchar_t ch;
+    wchar_t *outBuf;
+
+    if (!hFile || !text) return 0;
+    if (len == 0) return 1;
+
+    if (newlineStyle != NEWLINE_STYLE_LF && newlineStyle != NEWLINE_STYLE_CR) {
+        bytesToWrite = len * sizeof(wchar_t);
+        if (!WriteFile(hFile, text, bytesToWrite, &dwWritten, NULL)) return 0;
+        return dwWritten == bytesToWrite;
+    }
+
+    if (!EnsureFileIoWideBufferAppend(FILE_IO_READ_CHUNK + 4, 0)) return 0;
+    outBuf = g_fileIoWideBuf;
+    outCount = 0;
+
+    for (i = 0; i < len; i++) {
+        ch = text[i];
+        if (newlineStyle == NEWLINE_STYLE_LF) {
+            if (ch == L'\r') {
+                if (i + 1 < len && text[i + 1] == L'\n') i++;
+                ch = L'\n';
+            }
+        } else {
+            if (ch == L'\r') {
+                if (i + 1 < len && text[i + 1] == L'\n') i++;
+                ch = L'\r';
+            } else if (ch == L'\n') {
+                ch = L'\r';
+            }
+        }
+
+        outBuf[outCount++] = ch;
+        if (outCount >= FILE_IO_READ_CHUNK) {
+            bytesToWrite = (DWORD)outCount * sizeof(wchar_t);
+            if (!WriteFile(hFile, outBuf, bytesToWrite, &dwWritten, NULL)) return 0;
+            if (dwWritten != bytesToWrite) return 0;
+            outCount = 0;
+        }
+    }
+
+    if (outCount > 0) {
+        bytesToWrite = (DWORD)outCount * sizeof(wchar_t);
+        if (!WriteFile(hFile, outBuf, bytesToWrite, &dwWritten, NULL)) return 0;
+        if (dwWritten != bytesToWrite) return 0;
+    }
+
+    return 1;
+}
+
 /*
  * DoFileSave - Save current file (or Save As if untitled)
  */
@@ -4604,6 +4766,7 @@ static int DoFileSave(void)
     DWORD dwLen, dwWritten;
     wchar_t *pText = NULL;
     unsigned char bom[2] = {0xFF, 0xFE};
+    int writeOk = 0;
 
     if (!g_szFilePath[0]) {
         return DoFileSaveAs();
@@ -4635,10 +4798,20 @@ static int DoFileSave(void)
         GetWindowTextW(g_hwndEdit, pText, dwLen + 1);
     }
 
-    /* Write UTF-16 LE BOM */
-    WriteFile(hFile, bom, 2, &dwWritten, NULL);
-    /* Write text */
-    WriteFile(hFile, pText, dwLen * sizeof(wchar_t), &dwWritten, NULL);
+    if (!WriteFile(hFile, bom, 2, &dwWritten, NULL) || dwWritten != 2) {
+        CloseHandle(hFile);
+        if (!g_bPagedMode) LocalFree(pText);
+        MessageBoxW(g_hwndMain, L"Cannot save file.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    writeOk = WriteWideTextWithStyle(hFile, pText, dwLen, g_fileNewlineStyle);
+    if (!writeOk) {
+        CloseHandle(hFile);
+        if (!g_bPagedMode) LocalFree(pText);
+        MessageBoxW(g_hwndMain, L"Cannot save file.", g_szAppTitle, MB_OK | MB_ICONERROR);
+        return 0;
+    }
 
     CloseHandle(hFile);
     if (!g_bPagedMode) LocalFree(pText);
@@ -4809,7 +4982,7 @@ static void DoQuickNote(void)
             CloseHandle(hFile);
             return;
         }
-        if (ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &len)) {
+        if (ReadFileToUnicodeScratch(hFile, dwSize, &pWBuf, &len, &g_fileNewlineStyle)) {
             SetWindowTextW(g_hwndEdit, pWBuf);
         } else {
             MessageBoxW(g_hwndMain, L"Cannot load Quick Note file.", g_szAppTitle, MB_OK | MB_ICONERROR);
@@ -4820,6 +4993,7 @@ static void DoQuickNote(void)
     } else {
         /* New file - start empty */
         SetWindowTextW(g_hwndEdit, L"");
+        g_fileNewlineStyle = NEWLINE_STYLE_CRLF;
     }
 
     lstrcpyW(g_szFilePath, path);
