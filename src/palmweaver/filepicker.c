@@ -167,7 +167,15 @@ static int EntryListAdd(wchar_t **entries, int *count, int *capacity, const wcha
     return 1;
 }
 
-static void SortAndAdd(wchar_t *entries, int count, int bracket)
+static void CopyEntrySlot(wchar_t *dst, const wchar_t *src)
+{
+    int i;
+
+    for (i = 0; i < MAX_PATH - 1 && src[i]; i++) dst[i] = src[i];
+    dst[i] = 0;
+}
+
+static void InsertionSortEntries(wchar_t *entries, int count)
 {
     int i, j;
     wchar_t temp[MAX_PATH];
@@ -175,20 +183,118 @@ static void SortAndAdd(wchar_t *entries, int count, int bracket)
     wchar_t *prev;
     wchar_t *dst;
 
-    /* Simple insertion sort */
     for (i = 1; i < count; i++) {
         cur = entries + (i * MAX_PATH);
-        lstrcpyW(temp, cur);
+        CopyEntrySlot(temp, cur);
         j = i - 1;
         while (j >= 0) {
             prev = entries + (j * MAX_PATH);
             if (lstrcmpiW(prev, temp) <= 0) break;
             dst = entries + ((j + 1) * MAX_PATH);
-            lstrcpyW(dst, prev);
+            CopyEntrySlot(dst, prev);
             j--;
         }
         dst = entries + ((j + 1) * MAX_PATH);
-        lstrcpyW(dst, temp);
+        CopyEntrySlot(dst, temp);
+    }
+}
+
+static void MergeEntryRuns(wchar_t *entries, wchar_t *scratch, int left, int mid, int right)
+{
+    int i;
+    int j;
+    int k;
+    wchar_t *dst;
+    wchar_t *src;
+
+    i = left;
+    j = mid;
+    k = left;
+
+    while (i < mid && j < right) {
+        if (lstrcmpiW(entries + (i * MAX_PATH), entries + (j * MAX_PATH)) <= 0) {
+            dst = scratch + (k * MAX_PATH);
+            src = entries + (i * MAX_PATH);
+            CopyEntrySlot(dst, src);
+            i++;
+        } else {
+            dst = scratch + (k * MAX_PATH);
+            src = entries + (j * MAX_PATH);
+            CopyEntrySlot(dst, src);
+            j++;
+        }
+        k++;
+    }
+
+    while (i < mid) {
+        dst = scratch + (k * MAX_PATH);
+        src = entries + (i * MAX_PATH);
+        CopyEntrySlot(dst, src);
+        i++;
+        k++;
+    }
+
+    while (j < right) {
+        dst = scratch + (k * MAX_PATH);
+        src = entries + (j * MAX_PATH);
+        CopyEntrySlot(dst, src);
+        j++;
+        k++;
+    }
+
+    for (i = left; i < right; i++) {
+        dst = entries + (i * MAX_PATH);
+        src = scratch + (i * MAX_PATH);
+        CopyEntrySlot(dst, src);
+    }
+}
+
+static int MergeSortEntries(wchar_t *entries, int count)
+{
+    int width;
+    int left;
+    int mid;
+    int right;
+    int nextWidth;
+    wchar_t *scratch;
+
+    if (!entries || count < 2) return 1;
+
+    scratch = (wchar_t *)LocalAlloc(LMEM_FIXED, count * MAX_PATH * sizeof(wchar_t));
+    if (!scratch) return 0;
+
+    width = 1;
+    while (width < count) {
+        left = 0;
+        while (left < count) {
+            mid = left + width;
+            right = mid + width;
+            if (mid > count) mid = count;
+            if (right > count) right = count;
+            if (mid < right) MergeEntryRuns(entries, scratch, left, mid, right);
+            left += width * 2;
+        }
+
+        if (width > (count / 2)) break;
+        nextWidth = width * 2;
+        if (nextWidth <= width) break;
+        width = nextWidth;
+    }
+
+    LocalFree(scratch);
+    return 1;
+}
+
+static void SortAndAdd(wchar_t *entries, int count, int bracket)
+{
+    int i;
+    wchar_t *cur;
+
+    if (!entries || count <= 0) return;
+
+    /* Prefer O(N log N) merge sort for large directories; fall back safely on low memory. */
+    if (!MergeSortEntries(entries, count)) {
+        InsertionSortEntries(entries, count);
     }
 
     /* Add to listbox */
