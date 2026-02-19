@@ -3508,9 +3508,11 @@ static void DoInsertRule(void)
 static void DoReflow(void)
 {
     int selStart, selEnd, paraStart, paraEnd;
-    int len, col, i, wordStart;
+    int selLen, len, col, i, wordStart;
     int busy = 0;
-    wchar_t *text, *out, *p;
+    wchar_t *text = NULL;
+    wchar_t *out = NULL;
+    wchar_t *p;
 
     SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
 
@@ -3546,17 +3548,14 @@ static void DoReflow(void)
 
     if (selEnd <= selStart) return;
 
-    len = selEnd - selStart;
-    if (len > BUSY_TEXT_THRESHOLD) {
+    selLen = selEnd - selStart;
+    if (selLen > BUSY_TEXT_THRESHOLD) {
         SetStatusMessage(L"Reflowing...");
         BeginBusyCursor(L"reflow");
         busy = 1;
     }
-    text = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    out = (wchar_t *)LocalAlloc(LMEM_FIXED, (len * 2 + 1) * sizeof(wchar_t));
-    if (!text || !out) {
-        if (text) LocalFree(text);
-        if (out) LocalFree(out);
+
+    if (!CaptureEditRangeText(g_hwndEdit, (DWORD)selStart, (DWORD)selEnd, &text, &len)) {
         if (busy) {
             EndBusyCursor(L"reflow");
             ClearStatusMessage();
@@ -3564,23 +3563,14 @@ static void DoReflow(void)
         return;
     }
 
-    /* Get selected text via full buffer */
-    {
-        int totalLen = GetWindowTextLengthW(g_hwndEdit);
-        wchar_t *fullText = (wchar_t *)LocalAlloc(LMEM_FIXED, (totalLen + 1) * sizeof(wchar_t));
-        if (!fullText) {
-            LocalFree(text);
-            LocalFree(out);
-            if (busy) {
-                EndBusyCursor(L"reflow");
-                ClearStatusMessage();
-            }
-            return;
+    out = (wchar_t *)LocalAlloc(LMEM_FIXED, (len * 2 + 1) * sizeof(wchar_t));
+    if (!out) {
+        LocalFree(text);
+        if (busy) {
+            EndBusyCursor(L"reflow");
+            ClearStatusMessage();
         }
-        GetWindowTextW(g_hwndEdit, fullText, totalLen + 1);
-        for (i = 0; i < len; i++) text[i] = fullText[selStart + i];
-        text[len] = 0;
-        LocalFree(fullText);
+        return;
     }
 
     /* Select the range for replacement */
@@ -3633,9 +3623,11 @@ static void DoReflow(void)
     }
     *p = 0;
 
-    /* Record undo: delete original, insert new */
+    /* Record undo as one atomic reflow operation. */
+    Undo_BeginGroup();
     Undo_RecordDelete(selStart, text, len);
     Undo_RecordInsert(selStart, out, -1);
+    Undo_EndGroup();
 
     /* Replace selection with reflowed text */
     SendMessageW(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)out);
