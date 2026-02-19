@@ -68,6 +68,7 @@ HMENU g_hRecentMenu;
 static wchar_t g_szFilePath[MAX_PATH];
 static int g_bDirty = 0;
 static int g_fileNewlineStyle = 1; /* 1=CRLF, 2=LF, 3=CR, 4=mixed, 5=none/unknown */
+int g_nNewlineMode = 0;            /* 0=Auto(preserve), 1=CRLF, 2=LF */
 int g_bWordWrap = 1;  /* Word wrap on by default */
 int g_bShowLineNums = 1;  /* Line numbers on by default */
 int g_bShowStatusBar = 1; /* Status bar on by default */
@@ -110,6 +111,9 @@ static int g_bMousePresent = 1;
 #define NEWLINE_STYLE_CR         3
 #define NEWLINE_STYLE_MIXED      4
 #define NEWLINE_STYLE_NONE       5
+#define NEWLINE_MODE_AUTO        0
+#define NEWLINE_MODE_FORCE_CRLF  1
+#define NEWLINE_MODE_FORCE_LF    2
 #define PAGED_MODE_THRESHOLD_CHARS 60000
 #define PAGED_WINDOW_CHARS_NOWRAP 49152
 #define PAGED_WINDOW_CHARS_WRAP   16384
@@ -209,6 +213,8 @@ static int DetectNewlineStyle(const wchar_t *text, int len, int *outNeedsNormali
 static int NormalizeScratchNewlinesToCrLf(int *inOutLen);
 static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen, int *outNewlineStyle);
 static int WriteWideTextWithStyle(HANDLE hFile, const wchar_t *text, DWORD len, int newlineStyle);
+static int GetDefaultNewlineStyleForNewFile(void);
+static int GetSaveNewlineStyle(void);
 static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len);
 static int EnsureLineNumBuffers(int requiredChars);
 static void MarkStatusTotalsDirty(void);
@@ -3654,6 +3660,7 @@ static HWND g_hwndOptTabSize = NULL;
 static HWND g_hwndOptColumnLimit = NULL;
 static HWND g_hwndOptFixedFont = NULL;
 static HWND g_hwndOptShowColInd = NULL;
+static HWND g_hwndOptNewlineMode = NULL;
 /* Options dialog control IDs */
 #define IDC_OPT_TAB       100
 #define IDC_OPT_USETABS   101
@@ -3668,6 +3675,7 @@ static HWND g_hwndOptShowColInd = NULL;
 #define IDC_OPT_QNSTORAGE   110
 #define IDC_OPT_QNAUTOINIT  111
 #define IDC_OPT_SHOWCOLIND  112
+#define IDC_OPT_NEWLINEMODE 113
 
 /* External: settings */
 void ClearSettings(void);
@@ -3698,7 +3706,7 @@ static void UpdateFont(void)
 
 /* Options dialog - tabbed layout */
 static HWND g_hwndOptTab = NULL;
-#define OPT_EDITOR_CTRL_COUNT 9
+#define OPT_EDITOR_CTRL_COUNT 11
 #define OPT_DISPLAY_CTRL_COUNT 5
 #define OPT_STORAGE_CTRL_COUNT 2
 static HWND g_optEditorCtrls[OPT_EDITOR_CTRL_COUNT];   /* Editor tab controls */
@@ -3726,7 +3734,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             /* Tab control */
             g_hwndOptTab = CreateWindowW(WC_TABCONTROLW, NULL,
                 WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                4, 4, 282, 110, hwnd, (HMENU)IDC_OPT_TAB, g_hInst, NULL);
+                4, 4, 282, 132, hwnd, (HMENU)IDC_OPT_TAB, g_hInst, NULL);
             tci.mask = TCIF_TEXT;
             tci.pszText = L"Editor";
             SendMessage(g_hwndOptTab, TCM_INSERTITEMW, 0, (LPARAM)&tci);
@@ -3736,7 +3744,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             SendMessage(g_hwndOptTab, TCM_INSERTITEMW, 2, (LPARAM)&tci);
 
             /* Get tab content area */
-            SetRect(&tabRc, 0, 0, 282, 110);
+            SetRect(&tabRc, 0, 0, 282, 132);
             SendMessage(g_hwndOptTab, TCM_ADJUSTRECT, FALSE, (LPARAM)&tabRc);
             x = tabRc.left + 4;
             y = tabRc.top + 2;
@@ -3774,7 +3782,19 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (g_bShowColumnIndicator) SendMessage(g_hwndOptShowColInd, BM_SETCHECK, 1, 0);
             g_optEditorCtrls[8] = CreateWindowW(L"BUTTON", L"Clear Settings and Registry...",
                 WS_CHILD | BS_PUSHBUTTON,
-                x, y + 50, 175, 22, g_hwndOptTab, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+                x, y + 74, 205, 22, g_hwndOptTab, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
+            g_optEditorCtrls[9] = CreateWindowW(L"STATIC", L"Newlines:",
+                WS_CHILD, x, y + 53, 50, 16, g_hwndOptTab, NULL, g_hInst, NULL);
+            g_optEditorCtrls[10] = CreateWindowW(L"COMBOBOX", NULL,
+                WS_CHILD | CBS_DROPDOWNLIST,
+                x + 52, y + 50, 105, 90, g_hwndOptTab, (HMENU)IDC_OPT_NEWLINEMODE, g_hInst, NULL);
+            g_hwndOptNewlineMode = g_optEditorCtrls[10];
+            SendMessageW(g_hwndOptNewlineMode, CB_ADDSTRING, 0, (LPARAM)L"Auto");
+            SendMessageW(g_hwndOptNewlineMode, CB_ADDSTRING, 0, (LPARAM)L"CRLF");
+            SendMessageW(g_hwndOptNewlineMode, CB_ADDSTRING, 0, (LPARAM)L"LF");
+            if (g_nNewlineMode < NEWLINE_MODE_AUTO || g_nNewlineMode > NEWLINE_MODE_FORCE_LF)
+                g_nNewlineMode = NEWLINE_MODE_AUTO;
+            SendMessageW(g_hwndOptNewlineMode, CB_SETCURSEL, g_nNewlineMode, 0);
 
             SendMessage(g_bUseTabs ? g_hwndOptUseTabs : g_hwndOptUseSpaces, BM_SETCHECK, 1, 0);
 
@@ -3830,7 +3850,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK) {
             wchar_t buf[8];
-            int size, newSizeIdx, newFixed, newThemedSel;
+            int size, newSizeIdx, newFixed, newThemedSel, newNewlineMode;
 
             g_bUseTabs = (int)SendMessage(g_hwndOptUseTabs, BM_GETCHECK, 0, 0);
             GetWindowTextW(g_hwndOptTabSize, buf, 8);
@@ -3865,6 +3885,13 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             g_bHideTaskbar = (int)SendMessage(g_optDisplayCtrls[4], BM_GETCHECK, 0, 0);
             g_bQuickNoteStorage = (int)SendMessage(g_optStorageCtrls[0], BM_GETCHECK, 0, 0);
             g_bQuickNoteAutoInit = (int)SendMessage(g_optStorageCtrls[1], BM_GETCHECK, 0, 0);
+            newNewlineMode = (int)SendMessageW(g_hwndOptNewlineMode, CB_GETCURSEL, 0, 0);
+            if (newNewlineMode < NEWLINE_MODE_AUTO || newNewlineMode > NEWLINE_MODE_FORCE_LF)
+                newNewlineMode = NEWLINE_MODE_AUTO;
+            g_nNewlineMode = newNewlineMode;
+            if (!g_szFilePath[0]) {
+                g_fileNewlineStyle = GetDefaultNewlineStyleForNewFile();
+            }
 
             DestroyWindow(hwnd);
             g_hwndOptionsDlg = NULL;
@@ -3906,7 +3933,7 @@ static void DoOptions(void)
 
     g_hwndOptionsDlg = CreateWindowExW(WS_EX_CAPTIONOKBTN, L"PalmweaverOptions", L"Options",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        30, 25, 300, 145,
+        30, 20, 300, 168,
         g_hwndMain, NULL, g_hInst, NULL);
     ShowWindow(g_hwndOptionsDlg, SW_SHOW);
 }
@@ -4610,7 +4637,7 @@ static void DoFileNew(void)
     PagedReset();
     SetWindowTextW(g_hwndEdit, L"");
     g_szFilePath[0] = 0;
-    g_fileNewlineStyle = NEWLINE_STYLE_CRLF;
+    g_fileNewlineStyle = GetDefaultNewlineStyleForNewFile();
     g_bDirty = 0;
     Undo_Clear();
     UpdateTitle();
@@ -4757,6 +4784,19 @@ static int WriteWideTextWithStyle(HANDLE hFile, const wchar_t *text, DWORD len, 
     return 1;
 }
 
+static int GetDefaultNewlineStyleForNewFile(void)
+{
+    if (g_nNewlineMode == NEWLINE_MODE_FORCE_LF) return NEWLINE_STYLE_LF;
+    return NEWLINE_STYLE_CRLF;
+}
+
+static int GetSaveNewlineStyle(void)
+{
+    if (g_nNewlineMode == NEWLINE_MODE_FORCE_LF) return NEWLINE_STYLE_LF;
+    if (g_nNewlineMode == NEWLINE_MODE_FORCE_CRLF) return NEWLINE_STYLE_CRLF;
+    return g_fileNewlineStyle;
+}
+
 /*
  * DoFileSave - Save current file (or Save As if untitled)
  */
@@ -4805,7 +4845,7 @@ static int DoFileSave(void)
         return 0;
     }
 
-    writeOk = WriteWideTextWithStyle(hFile, pText, dwLen, g_fileNewlineStyle);
+    writeOk = WriteWideTextWithStyle(hFile, pText, dwLen, GetSaveNewlineStyle());
     if (!writeOk) {
         CloseHandle(hFile);
         if (!g_bPagedMode) LocalFree(pText);
@@ -4993,7 +5033,7 @@ static void DoQuickNote(void)
     } else {
         /* New file - start empty */
         SetWindowTextW(g_hwndEdit, L"");
-        g_fileNewlineStyle = NEWLINE_STYLE_CRLF;
+        g_fileNewlineStyle = GetDefaultNewlineStyleForNewFile();
     }
 
     lstrcpyW(g_szFilePath, path);
