@@ -3030,9 +3030,9 @@ static void DoReplaceOne(void)
 {
     DWORD selStart, selEnd;
     int selLen, findLen, i, match = 1;
-    int replLen;
-    int len;
-    wchar_t *buf;
+    int replLen, len;
+    wchar_t *selText = NULL;
+    int selTextLen = 0;
     wchar_t msg[80];
     int replLine, replCol, nextLine, nextCol;
 
@@ -3150,13 +3150,15 @@ static void DoReplaceOne(void)
         if (selLen != findLen) return;  /* Nothing found */
     }
 
-    len = GetWindowTextLengthW(g_hwndEdit);
-    buf = (wchar_t *)LocalAlloc(LMEM_FIXED, (len + 1) * sizeof(wchar_t));
-    if (!buf) return;
-    GetWindowTextW(g_hwndEdit, buf, len + 1);
+    if (!CaptureEditRangeText(g_hwndEdit, selStart, selEnd, &selText, &selTextLen)) return;
+    if (selTextLen != findLen) {
+        LocalFree(selText);
+        DoFindNext();
+        return;
+    }
 
     for (i = 0; i < selLen && match; i++) {
-        if (!CharsMatch(buf[selStart + i], g_findText[i])) match = 0;
+        if (!CharsMatch(selText[i], g_findText[i])) match = 0;
     }
 
     if (match) {
@@ -3165,13 +3167,13 @@ static void DoReplaceOne(void)
         
         /* Record undo: delete found text, insert replacement */
         Undo_BeginGroup();
-        Undo_RecordDelete(selStart, buf + selStart, selLen);
+        Undo_RecordDelete(selStart, selText, selLen);
         Undo_RecordInsert(selStart, g_replaceText, -1);
         Undo_EndGroup();
         SendMessage(g_hwndEdit, EM_REPLACESEL, TRUE, (LPARAM)g_replaceText);
         g_bDirty = 1;
         UpdateTitle();
-        LocalFree(buf);
+        LocalFree(selText);
         
         /* Find next and show combined message */
         DoFindNext();
@@ -3186,7 +3188,7 @@ static void DoReplaceOne(void)
         SetStatusMessage(msg);
         return;
     }
-    LocalFree(buf);
+    LocalFree(selText);
     DoFindNext();
 }
 
