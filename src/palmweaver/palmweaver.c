@@ -414,17 +414,28 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
     DWORD dwRead = 0;
     DWORD bytesRemaining = 0;
     DWORD toRead = 0;
-    unsigned char bom[2];
+    unsigned char bom[3];
     unsigned char *uBuf;
     int textLen = 0;
     int i;
-    int isUtf16 = 0;
+    int decodeMode = 0; /* 0 = ACP fallback, 1 = UTF-16 LE BOM, 2 = UTF-8 BOM */
+    int startOffset = 0;
     int pendingUtf16Lo = -1;
     int carryByte = -1;
+    int utf8Need = 0;
+    unsigned long utf8Code = 0;
+    unsigned long utf8Min = 0;
+    int utf8SeqLen = 0;
+    unsigned char utf8Seq[4];
     int chunkBytes;
     int readOffset;
     int needChars;
     int converted;
+    int byteVal;
+    int reconsume;
+    int valid;
+    unsigned long cp;
+    int j;
 
     if (!outText || !outLen || hFile == INVALID_HANDLE_VALUE) return 0;
     *outText = NULL;
@@ -435,20 +446,20 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
     uBuf = (unsigned char *)g_fileIoByteBuf;
 
     if (fileSize >= 2) {
-        if (!ReadFile(hFile, bom, 2, &dwRead, NULL)) return 0;
-        if (dwRead == 2 && bom[0] == 0xFF && bom[1] == 0xFE) {
-            isUtf16 = 1;
-            bytesRemaining = fileSize - 2;
-        } else {
-            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-            bytesRemaining = fileSize;
+        toRead = (fileSize >= 3) ? 3 : 2;
+        if (!ReadFile(hFile, bom, toRead, &dwRead, NULL)) return 0;
+        if (dwRead >= 2 && bom[0] == 0xFF && bom[1] == 0xFE) {
+            decodeMode = 1;
+            startOffset = 2;
+        } else if (dwRead >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
+            decodeMode = 2;
+            startOffset = 3;
         }
-    } else {
-        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-        bytesRemaining = fileSize;
     }
+    SetFilePointer(hFile, startOffset, NULL, FILE_BEGIN);
+    bytesRemaining = fileSize - (DWORD)startOffset;
 
-    if (isUtf16) {
+    if (decodeMode == 1) {
         int expectedChars = (int)(bytesRemaining / 2) + 2;
         if (!EnsureFileIoWideBufferAppend(expectedChars, 0)) return 0;
 
@@ -474,9 +485,113 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
             if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
             g_fileIoWideBuf[textLen++] = (wchar_t)pendingUtf16Lo;
         }
+    } else if (decodeMode == 2) {
+        if (!EnsureFileIoWideBufferAppend((int)fileSize + 2, 0)) return 0;
+        utf8Need = 0;
+        utf8Code = 0;
+        utf8Min = 0;
+        utf8SeqLen = 0;
+
+        while (bytesRemaining > 0) {
+            toRead = bytesRemaining;
+            if (toRead > FILE_IO_READ_CHUNK) toRead = FILE_IO_READ_CHUNK;
+
+            if (!ReadFile(hFile, g_fileIoByteBuf, toRead, &dwRead, NULL)) return 0;
+            if (dwRead == 0) break;
+            bytesRemaining -= dwRead;
+
+            chunkBytes = (int)dwRead;
+            for (i = 0; i < chunkBytes; i++) {
+                byteVal = (int)uBuf[i];
+                reconsume = 1;
+
+                while (reconsume) {
+                    reconsume = 0;
+
+                    if (utf8Need == 0) {
+                        if (byteVal <= 0x7F) {
+                            if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
+                            g_fileIoWideBuf[textLen++] = (wchar_t)byteVal;
+                        } else if (byteVal >= 0xC2 && byteVal <= 0xDF) {
+                            utf8Need = 1;
+                            utf8Code = (unsigned long)(byteVal & 0x1F);
+                            utf8Min = 0x80UL;
+                            utf8Seq[0] = (unsigned char)byteVal;
+                            utf8SeqLen = 1;
+                        } else if (byteVal >= 0xE0 && byteVal <= 0xEF) {
+                            utf8Need = 2;
+                            utf8Code = (unsigned long)(byteVal & 0x0F);
+                            utf8Min = 0x800UL;
+                            utf8Seq[0] = (unsigned char)byteVal;
+                            utf8SeqLen = 1;
+                        } else if (byteVal >= 0xF0 && byteVal <= 0xF4) {
+                            utf8Need = 3;
+                            utf8Code = (unsigned long)(byteVal & 0x07);
+                            utf8Min = 0x10000UL;
+                            utf8Seq[0] = (unsigned char)byteVal;
+                            utf8SeqLen = 1;
+                        } else {
+                            if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
+                            g_fileIoWideBuf[textLen++] = (wchar_t)byteVal;
+                        }
+                    } else {
+                        if ((byteVal & 0xC0) == 0x80) {
+                            utf8Code = (utf8Code << 6) | (unsigned long)(byteVal & 0x3F);
+                            if (utf8SeqLen < 4) utf8Seq[utf8SeqLen++] = (unsigned char)byteVal;
+                            utf8Need--;
+
+                            if (utf8Need == 0) {
+                                valid = 1;
+                                if (utf8Code < utf8Min) valid = 0;
+                                if (utf8Code > 0x10FFFFUL) valid = 0;
+                                if (utf8Code >= 0xD800UL && utf8Code <= 0xDFFFUL) valid = 0;
+
+                                if (valid) {
+                                    if (utf8Code <= 0xFFFFUL) {
+                                        if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
+                                        g_fileIoWideBuf[textLen++] = (wchar_t)utf8Code;
+                                    } else {
+                                        cp = utf8Code - 0x10000UL;
+                                        if (!EnsureFileIoWideBufferAppend(textLen + 3, textLen)) return 0;
+                                        g_fileIoWideBuf[textLen++] = (wchar_t)(0xD800 + (cp >> 10));
+                                        g_fileIoWideBuf[textLen++] = (wchar_t)(0xDC00 + (cp & 0x3FF));
+                                    }
+                                } else {
+                                    if (!EnsureFileIoWideBufferAppend(textLen + utf8SeqLen + 1, textLen)) return 0;
+                                    for (j = 0; j < utf8SeqLen; j++) {
+                                        g_fileIoWideBuf[textLen++] = (wchar_t)utf8Seq[j];
+                                    }
+                                }
+
+                                utf8Need = 0;
+                                utf8Code = 0;
+                                utf8Min = 0;
+                                utf8SeqLen = 0;
+                            }
+                        } else {
+                            if (!EnsureFileIoWideBufferAppend(textLen + utf8SeqLen + 1, textLen)) return 0;
+                            for (j = 0; j < utf8SeqLen; j++) {
+                                g_fileIoWideBuf[textLen++] = (wchar_t)utf8Seq[j];
+                            }
+
+                            utf8Need = 0;
+                            utf8Code = 0;
+                            utf8Min = 0;
+                            utf8SeqLen = 0;
+                            reconsume = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (utf8Need > 0 && utf8SeqLen > 0) {
+            if (!EnsureFileIoWideBufferAppend(textLen + utf8SeqLen + 1, textLen)) return 0;
+            for (i = 0; i < utf8SeqLen; i++) {
+                g_fileIoWideBuf[textLen++] = (wchar_t)utf8Seq[i];
+            }
+        }
     } else {
-        SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-        bytesRemaining = fileSize;
         if (!EnsureFileIoWideBufferAppend((int)fileSize + 2, 0)) return 0;
 
         while (bytesRemaining > 0) {
