@@ -198,6 +198,7 @@ static void EndBusyCursor(const wchar_t *tag);
 static void ForceIdleCursor(void);
 static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel);
 static int EnsureFileIoByteBuffer(DWORD requiredBytes);
+static int IsLikelyUtf8NoBom(HANDLE hFile, DWORD fileSize);
 static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen);
 static wchar_t *AllocOwnedUnicodeCopy(const wchar_t *text, int len);
 static int EnsureLineNumBuffers(int requiredChars);
@@ -409,6 +410,102 @@ static int EnsureFileIoWideBufferAppend(int requiredChars, int keepChars)
     return 1;
 }
 
+static int IsLikelyUtf8NoBom(HANDLE hFile, DWORD fileSize)
+{
+    DWORD dwRead = 0;
+    DWORD bytesRemaining = 0;
+    DWORD toRead = 0;
+    unsigned char *uBuf;
+    int i;
+    int byteVal;
+    int reconsume;
+    int utf8Need = 0;
+    unsigned long utf8Code = 0;
+    unsigned long utf8Min = 0;
+    int utf8SeqCount = 0;
+    int highByteCount = 0;
+    int invalidCount = 0;
+
+    if (hFile == INVALID_HANDLE_VALUE || fileSize == 0) return 0;
+    if (!EnsureFileIoByteBuffer(FILE_IO_READ_CHUNK + 4)) return 0;
+    uBuf = (unsigned char *)g_fileIoByteBuf;
+
+    SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+    bytesRemaining = fileSize;
+
+    while (bytesRemaining > 0) {
+        toRead = bytesRemaining;
+        if (toRead > FILE_IO_READ_CHUNK) toRead = FILE_IO_READ_CHUNK;
+        if (!ReadFile(hFile, g_fileIoByteBuf, toRead, &dwRead, NULL)) {
+            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+            return 0;
+        }
+        if (dwRead == 0) break;
+        bytesRemaining -= dwRead;
+
+        for (i = 0; i < (int)dwRead; i++) {
+            byteVal = (int)uBuf[i];
+            if (byteVal >= 0x80) highByteCount++;
+            reconsume = 1;
+
+            while (reconsume) {
+                reconsume = 0;
+
+                if (utf8Need == 0) {
+                    if (byteVal <= 0x7F) {
+                        /* ASCII */
+                    } else if (byteVal >= 0xC2 && byteVal <= 0xDF) {
+                        utf8Need = 1;
+                        utf8Code = (unsigned long)(byteVal & 0x1F);
+                        utf8Min = 0x80UL;
+                    } else if (byteVal >= 0xE0 && byteVal <= 0xEF) {
+                        utf8Need = 2;
+                        utf8Code = (unsigned long)(byteVal & 0x0F);
+                        utf8Min = 0x800UL;
+                    } else if (byteVal >= 0xF0 && byteVal <= 0xF4) {
+                        utf8Need = 3;
+                        utf8Code = (unsigned long)(byteVal & 0x07);
+                        utf8Min = 0x10000UL;
+                    } else {
+                        invalidCount++;
+                    }
+                } else {
+                    if ((byteVal & 0xC0) == 0x80) {
+                        utf8Code = (utf8Code << 6) | (unsigned long)(byteVal & 0x3F);
+                        utf8Need--;
+                        if (utf8Need == 0) {
+                            if (utf8Code < utf8Min ||
+                                utf8Code > 0x10FFFFUL ||
+                                (utf8Code >= 0xD800UL && utf8Code <= 0xDFFFUL)) {
+                                invalidCount++;
+                            } else {
+                                utf8SeqCount++;
+                            }
+                        }
+                    } else {
+                        invalidCount++;
+                        utf8Need = 0;
+                        utf8Code = 0;
+                        utf8Min = 0;
+                        reconsume = 1;
+                    }
+                }
+            }
+
+            if (invalidCount > 0) break;
+        }
+
+        if (invalidCount > 0) break;
+    }
+
+    if (utf8Need > 0) invalidCount++;
+
+    SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+    if (highByteCount == 0) return 0;      /* Pure ASCII: ACP and UTF-8 are equivalent. */
+    if (invalidCount != 0) return 0;
+    return (utf8SeqCount > 0) ? 1 : 0;
+}
+
 static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outText, int *outLen)
 {
     DWORD dwRead = 0;
@@ -418,7 +515,7 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
     unsigned char *uBuf;
     int textLen = 0;
     int i;
-    int decodeMode = 0; /* 0 = ACP fallback, 1 = UTF-16 LE BOM, 2 = UTF-8 BOM */
+    int decodeMode = 0; /* 0 = ACP fallback, 1 = UTF-16 LE BOM, 2 = UTF-8 BOM, 3 = likely UTF-8 no BOM */
     int startOffset = 0;
     int pendingUtf16Lo = -1;
     int carryByte = -1;
@@ -456,6 +553,9 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
             startOffset = 3;
         }
     }
+    if (decodeMode == 0 && fileSize > 0) {
+        if (IsLikelyUtf8NoBom(hFile, fileSize)) decodeMode = 3;
+    }
     SetFilePointer(hFile, startOffset, NULL, FILE_BEGIN);
     bytesRemaining = fileSize - (DWORD)startOffset;
 
@@ -485,7 +585,7 @@ static int ReadFileToUnicodeScratch(HANDLE hFile, DWORD fileSize, wchar_t **outT
             if (!EnsureFileIoWideBufferAppend(textLen + 2, textLen)) return 0;
             g_fileIoWideBuf[textLen++] = (wchar_t)pendingUtf16Lo;
         }
-    } else if (decodeMode == 2) {
+    } else if (decodeMode == 2 || decodeMode == 3) {
         if (!EnsureFileIoWideBufferAppend((int)fileSize + 2, 0)) return 0;
         utf8Need = 0;
         utf8Code = 0;
