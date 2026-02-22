@@ -324,6 +324,13 @@ static void EndBusyCursor(const wchar_t *tag)
     if (g_hwndStatus) UpdateStatus();
 }
 
+static void RefreshStatusAfterDocumentLoad(void)
+{
+    g_bForceStatusRefresh = 1;
+    MarkStatusTotalsDirty();
+    UpdateStatus();
+}
+
 static int GetLoadFileSizeGuarded(HANDLE hFile, DWORD *outSize, const wchar_t *sourceLabel)
 {
     DWORD fileSize;
@@ -3192,11 +3199,52 @@ static void DoReplaceOne(void)
     DoFindNext();
 }
 
+static int EnsureReplaceAllBuffer(wchar_t **buf, int *cap, int required, int keepChars)
+{
+    int newCap;
+    int i;
+    wchar_t *newBuf;
+
+    if (!buf || !cap) return 0;
+    if (required <= *cap) return 1;
+
+    newCap = *cap;
+    if (newCap < 256) newCap = 256;
+    while (newCap < required) {
+        if (newCap > 0x20000000) {
+            newCap = required;
+            break;
+        }
+        newCap *= 2;
+    }
+
+    newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+    if (!newBuf) {
+        newCap = required;
+        newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED, (newCap + 1) * sizeof(wchar_t));
+        if (!newBuf) return 0;
+    }
+
+    if (*buf && keepChars > 0) {
+        if (keepChars > newCap) keepChars = newCap;
+        for (i = 0; i < keepChars; i++) newBuf[i] = (*buf)[i];
+    }
+    newBuf[keepChars] = 0;
+
+    if (*buf) LocalFree(*buf);
+    *buf = newBuf;
+    *cap = newCap;
+    return 1;
+}
+
 static int DoReplaceAll(void)
 {
     int len, findLen, replLen, count = 0, i, j;
+    int outPos = 0;
+    int outCap = 0;
+    int matched;
     int busy = 0;
-    wchar_t *buf, *newBuf, *p;
+    wchar_t *buf, *newBuf;
     DWORD selStart;
     int keepGlobalPos;
 
@@ -3239,47 +3287,75 @@ static int DoReplaceAll(void)
         keepGlobalPos = 0;
     }
 
-    /* Count matches */
-    for (i = 0; i <= len - findLen; i++) {
-        for (j = 0; j < findLen; j++) {
-            if (!CharsMatch(buf[i + j], g_findText[j])) break;
+    newBuf = NULL;
+    if (!EnsureReplaceAllBuffer(&newBuf, &outCap, len + 1, 0)) {
+        if (!g_bPagedMode) LocalFree(buf);
+        if (busy) {
+            EndBusyCursor(L"replall");
+            ClearStatusMessage();
         }
-        if (j == findLen) count++;
+        return 0;
     }
+
+    i = 0;
+    while (i < len) {
+        matched = 0;
+        if (i <= len - findLen) {
+            matched = 1;
+            for (j = 0; j < findLen; j++) {
+                if (!CharsMatch(buf[i + j], g_findText[j])) {
+                    matched = 0;
+                    break;
+                }
+            }
+        }
+
+        if (matched) {
+            if (!EnsureReplaceAllBuffer(&newBuf, &outCap, outPos + replLen + 1, outPos)) {
+                if (!g_bPagedMode) LocalFree(buf);
+                if (busy) {
+                    EndBusyCursor(L"replall");
+                    ClearStatusMessage();
+                }
+                LocalFree(newBuf);
+                return 0;
+            }
+            for (j = 0; j < replLen; j++) newBuf[outPos++] = g_replaceText[j];
+            i += findLen;
+            count++;
+        } else {
+            if (!EnsureReplaceAllBuffer(&newBuf, &outCap, outPos + 2, outPos)) {
+                if (!g_bPagedMode) LocalFree(buf);
+                if (busy) {
+                    EndBusyCursor(L"replall");
+                    ClearStatusMessage();
+                }
+                LocalFree(newBuf);
+                return 0;
+            }
+            newBuf[outPos++] = buf[i++];
+        }
+    }
+
+    if (!EnsureReplaceAllBuffer(&newBuf, &outCap, outPos + 1, outPos)) {
+        if (!g_bPagedMode) LocalFree(buf);
+        if (busy) {
+            EndBusyCursor(L"replall");
+            ClearStatusMessage();
+        }
+        LocalFree(newBuf);
+        return 0;
+    }
+    newBuf[outPos] = 0;
 
     if (count == 0) {
+        LocalFree(newBuf);
         if (!g_bPagedMode) LocalFree(buf);
         if (busy) {
             EndBusyCursor(L"replall");
             ClearStatusMessage();
         }
         return 0;
-    }
-
-    newBuf = (wchar_t *)LocalAlloc(LMEM_FIXED,
-        (len + count * (replLen - findLen) + 1) * sizeof(wchar_t));
-    if (!newBuf) {
-        if (!g_bPagedMode) LocalFree(buf);
-        if (busy) {
-            EndBusyCursor(L"replall");
-            ClearStatusMessage();
-        }
-        return 0;
-    }
-
-    p = newBuf;
-    for (i = 0; i <= len; i++) {
-        if (i <= len - findLen) {
-            for (j = 0; j < findLen; j++) {
-                if (!CharsMatch(buf[i + j], g_findText[j])) break;
-            }
-            if (j == findLen) {
-                for (j = 0; j < replLen; j++) *p++ = g_replaceText[j];
-                i += findLen - 1;
-                continue;
-            }
-        }
-        *p++ = buf[i];
     }
 
     /* Record undo: delete all, insert new */
@@ -3303,8 +3379,10 @@ static int DoReplaceAll(void)
             SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
         }
     } else {
+        Undo_BeginGroup();
         Undo_RecordDelete(0, buf, len);
         Undo_RecordInsert(0, newBuf, -1);
+        Undo_EndGroup();
         SetWindowTextW(g_hwndEdit, newBuf);
         g_bDirty = 1;
         UpdateTitle();
@@ -4433,6 +4511,7 @@ static void OpenRecentFile(int index)
         EndBusyCursor(L"openrecent");
         ClearStatusMessage();
     }
+    RefreshStatusAfterDocumentLoad();
 }
 
 /*
@@ -4636,6 +4715,7 @@ static void DoFileNew(void)
     Undo_Clear();
     UpdateTitle();
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
+    RefreshStatusAfterDocumentLoad();
 }
 
 /*
@@ -4719,6 +4799,7 @@ static int DoFileOpen(void)
         EndBusyCursor(L"open");
         ClearStatusMessage();
     }
+    RefreshStatusAfterDocumentLoad();
     return 1;
 }
 
