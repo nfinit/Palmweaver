@@ -169,6 +169,7 @@ static int g_bPagedMode = 0;
 static int g_bPagedLoading = 0;
 static int g_bPagedPageDirty = 0;
 static int g_bPreserveUndoOnPagedLoad = 0;
+static int g_bKeepPagedReplaceUndo = 0;
 static wchar_t *g_pagedText = NULL;
 static int g_pagedTextLen = 0;
 static int g_pagedPageStart = 0;
@@ -248,6 +249,7 @@ static int PagedGetWindowChars(void);
 static int PagedGetEdgeChars(void);
 static int PagedEnsureSwapBuffer(int requiredChars);
 static int PagedGetGlobalSelStart(void);
+static int PagedPrepareUndoTarget(int localPos);
 static void PagedIndexToLineCol(int index, int *outLine, int *outCol);
 static int PagedGetGlobalLineFromLocalChar(int localChar);
 static int PagedGetVisibleRows(void);
@@ -256,6 +258,8 @@ static int PagedHandleThumbScroll(UINT scrollCode);
 static int PagedProcessScrollCode(UINT scrollCode);
 static void PagedMaybeShiftWindowByCaret(void);
 static void PagedHandleVScrollEdge(UINT scrollCode);
+static int PerformTrackedUndo(void);
+static int PerformTrackedRedo(void);
 static void DoFileNew(void);
 static int DoFileOpen(void);
 static int DoFileSave(void);
@@ -1149,7 +1153,10 @@ static int PagedLoadWindowAt(int globalPos)
     SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
     /* Keep scrollbar position stable before heavier refresh work. */
     PagedSyncVScroll();
-    if (!g_bPreserveUndoOnPagedLoad) Undo_Clear();
+    if (!g_bPreserveUndoOnPagedLoad) {
+        Undo_Clear();
+        g_bKeepPagedReplaceUndo = 0;
+    }
     RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
     UpdateStatus();
     return 1;
@@ -1194,6 +1201,35 @@ static int PagedGetGlobalSelStart(void)
     if (!g_bPagedMode || !g_hwndEdit) return 0;
     SendMessageW(g_hwndEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
     return g_pagedPageStart + (int)selStart;
+}
+
+static int PagedPrepareUndoTarget(int localPos)
+{
+    int targetGlobal;
+    int oldPageStart;
+    int preserveUndo;
+    int undoDelta;
+
+    if (!g_bPagedMode || !g_pagedText || !g_hwndEdit) return 1;
+    if (localPos >= 0 && localPos <= g_pagedPageLen) return 1;
+
+    targetGlobal = g_pagedPageStart + localPos;
+    if (targetGlobal < 0) targetGlobal = 0;
+    if (targetGlobal > g_pagedTextLen) targetGlobal = g_pagedTextLen;
+
+    oldPageStart = g_pagedPageStart;
+    preserveUndo = g_bPreserveUndoOnPagedLoad;
+    g_bPreserveUndoOnPagedLoad = 1;
+    if (!PagedLoadWindowAt(targetGlobal)) {
+        g_bPreserveUndoOnPagedLoad = preserveUndo;
+        return 0;
+    }
+    g_bPreserveUndoOnPagedLoad = preserveUndo;
+
+    undoDelta = oldPageStart - g_pagedPageStart;
+    if (undoDelta) Undo_ShiftPositions(undoDelta);
+    RefreshEditAfterLargeJump();
+    return 1;
 }
 
 static void PagedIndexToLineCol(int index, int *outLine, int *outCol)
@@ -1981,7 +2017,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
     /* Intercept Ctrl+Z before Edit control's default handler */
     if (msg == WM_KEYDOWN && wParam == 'Z' && GetKeyState(VK_CONTROL) < 0) {
-        if (!Undo_Perform()) {
+        if (!PerformTrackedUndo()) {
             SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
         }
         RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
@@ -1990,7 +2026,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     
     /* Intercept Ctrl+Y for redo */
     if (msg == WM_KEYDOWN && wParam == 'Y' && GetKeyState(VK_CONTROL) < 0) {
-        Undo_Redo();
+        PerformTrackedRedo();
         RequestLineNumberRefresh(LINENUM_DIRTY_TEXT | LINENUM_DIRTY_LAYOUT, 1);
         return 0;
     }
@@ -2835,6 +2871,40 @@ static void RefreshEditAfterLargeJump(void)
     UpdateWindow(g_hwndEdit);
 }
 
+static int PerformTrackedUndo(void)
+{
+    int undoPos;
+
+    if (g_bPagedMode && Undo_CanUndo() && Undo_PeekUndoPos(&undoPos)) {
+        if (!PagedPrepareUndoTarget(undoPos)) {
+            SetStatusMessage(L"Cannot restore undo target");
+            return 1;
+        }
+    }
+
+    if (Undo_Perform()) {
+        g_bKeepPagedReplaceUndo = 0;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int PerformTrackedRedo(void)
+{
+    int redoPos;
+
+    if (g_bPagedMode && Undo_CanRedo() && Undo_PeekRedoPos(&redoPos)) {
+        if (!PagedPrepareUndoTarget(redoPos)) {
+            SetStatusMessage(L"Cannot restore redo target");
+            return 1;
+        }
+    }
+
+    if (Undo_Redo()) return 1;
+    return 0;
+}
+
 static void QueueEditRepaintAfterJump(void)
 {
     if (!g_hwndEdit || g_bPostJumpRepaintPending) return;
@@ -2846,11 +2916,15 @@ static void DoFindNext(void)
 {
     int len, findLen, start, k;
     int canSelectRange, usePaged;
+    int preserveUndo = 0;
+    int undoPageStart = 0;
+    int undoDelta = 0;
     int busy = 0;
     wchar_t *buf = NULL;
     wchar_t msg[96];
     DWORD selStart, selEnd;
     int line, col;
+    int localStart, localEnd;
     int foundAt = -1;
     int wrapped = 0;
 
@@ -2897,14 +2971,26 @@ static void DoFindNext(void)
 
     if (foundAt >= 0) {
         if (usePaged) {
+            if (g_bKeepPagedReplaceUndo && Undo_CanUndo()) {
+                g_bPreserveUndoOnPagedLoad = 1;
+                preserveUndo = 1;
+                undoPageStart = g_pagedPageStart;
+            }
             if (PagedLoadWindowAt(foundAt)) {
-                int localStart = foundAt - g_pagedPageStart;
-                int localEnd = localStart + findLen;
+                if (preserveUndo) {
+                    undoDelta = undoPageStart - g_pagedPageStart;
+                    if (undoDelta) Undo_ShiftPositions(undoDelta);
+                }
+                localStart = foundAt - g_pagedPageStart;
+                localEnd = localStart + findLen;
                 if (localStart < 0) localStart = 0;
                 if (localEnd > g_pagedPageLen) localEnd = g_pagedPageLen;
                 SendMessageW(g_hwndEdit, EM_SETSEL, localStart, localEnd);
                 SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
                 RefreshEditAfterLargeJump();
+            }
+            if (preserveUndo) {
+                g_bPreserveUndoOnPagedLoad = 0;
             }
             PagedIndexToLineCol(foundAt, &line, &col);
             wsprintfW(msg, wrapped ? L"Found at Ln %d, Col %d (wrapped)" : L"Found at Ln %d, Col %d", line, col);
@@ -3058,10 +3144,16 @@ static void DoReplaceOne(void)
         int newLen;
         int tailStart, tailLen;
         int localStart, localEnd;
+        int undoPageStart;
+        int undoLocalStart;
+        int undoDelta;
+        int haveUndoRecord = 0;
+        wchar_t *undoDeleted = NULL;
         wchar_t *newDoc;
 
         if (!g_pagedText) return;
         if (!PagedCommitPage()) return;
+        g_bKeepPagedReplaceUndo = 0;
 
         len = g_pagedTextLen;
         if (len < findLen || findLen <= 0) {
@@ -3086,6 +3178,28 @@ static void DoReplaceOne(void)
         }
 
         PagedIndexToLineCol(foundAt, &replLine, &replCol);
+        undoPageStart = g_pagedPageStart;
+        if (foundAt < g_pagedPageStart || foundAt + findLen > g_pagedPageStart + g_pagedPageLen) {
+            if (!PagedLoadWindowAt(foundAt)) undoPageStart = -1;
+            else undoPageStart = g_pagedPageStart;
+        }
+        if (undoPageStart >= 0) {
+            undoLocalStart = foundAt - undoPageStart;
+            if (undoLocalStart < 0) undoLocalStart = 0;
+            if (undoLocalStart > g_pagedPageLen) undoLocalStart = g_pagedPageLen;
+
+            undoDeleted = (wchar_t *)LocalAlloc(LMEM_FIXED, (findLen + 1) * sizeof(wchar_t));
+            if (undoDeleted) {
+                for (i = 0; i < findLen; i++) undoDeleted[i] = g_pagedText[foundAt + i];
+                undoDeleted[findLen] = 0;
+                Undo_BeginGroup();
+                Undo_RecordDelete(undoLocalStart, undoDeleted, findLen);
+                Undo_RecordInsert(undoLocalStart, g_replaceText, -1);
+                Undo_EndGroup();
+                LocalFree(undoDeleted);
+                haveUndoRecord = 1;
+            }
+        }
 
         newLen = len + (replLen - findLen);
         if (newLen < 0) return;
@@ -3111,11 +3225,19 @@ static void DoReplaceOne(void)
         MarkStatusTotalsDirty();
         g_bDirty = 1;
         UpdateTitle();
+        if (haveUndoRecord) g_bKeepPagedReplaceUndo = 1;
 
         nextStart = foundAt + replLen;
         if (nextStart > g_pagedTextLen) nextStart = 0;
         if (FindNextMatchInBuffer(g_pagedText, g_pagedTextLen, g_findText, findLen, nextStart, &nextFound, &nextWrapped)) {
+            if (haveUndoRecord) {
+                g_bPreserveUndoOnPagedLoad = 1;
+            }
             if (PagedLoadWindowAt(nextFound)) {
+                if (haveUndoRecord) {
+                    undoDelta = undoPageStart - g_pagedPageStart;
+                    if (undoDelta) Undo_ShiftPositions(undoDelta);
+                }
                 localStart = nextFound - g_pagedPageStart;
                 localEnd = localStart + findLen;
                 if (localStart < 0) localStart = 0;
@@ -3123,6 +3245,9 @@ static void DoReplaceOne(void)
                 SendMessageW(g_hwndEdit, EM_SETSEL, localStart, localEnd);
                 SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
                 RefreshEditAfterLargeJump();
+            }
+            if (haveUndoRecord) {
+                g_bPreserveUndoOnPagedLoad = 0;
             }
             PagedIndexToLineCol(nextFound, &nextLine, &nextCol);
             if (nextWrapped || wrapped) {
@@ -3133,12 +3258,22 @@ static void DoReplaceOne(void)
                     replLine, replCol, nextLine, nextCol);
             }
         } else {
+            if (haveUndoRecord) {
+                g_bPreserveUndoOnPagedLoad = 1;
+            }
             if (PagedLoadWindowAt(foundAt + replLen)) {
+                if (haveUndoRecord) {
+                    undoDelta = undoPageStart - g_pagedPageStart;
+                    if (undoDelta) Undo_ShiftPositions(undoDelta);
+                }
                 localStart = (foundAt + replLen) - g_pagedPageStart;
                 if (localStart < 0) localStart = 0;
                 if (localStart > g_pagedPageLen) localStart = g_pagedPageLen;
                 SendMessageW(g_hwndEdit, EM_SETSEL, localStart, localStart);
                 SendMessageW(g_hwndEdit, EM_SCROLLCARET, 0, 0);
+            }
+            if (haveUndoRecord) {
+                g_bPreserveUndoOnPagedLoad = 0;
             }
             wsprintfW(msg, L"Replaced Ln %d Col %d, no more matches", replLine, replCol);
         }
@@ -5306,7 +5441,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
 
         case IDM_EDIT_UNDO:
-            if (!Undo_Perform()) {
+            if (!PerformTrackedUndo()) {
                 /* Fall back to built-in undo for user typing */
                 SendMessageW(g_hwndEdit, EM_UNDO, 0, 0);
             }

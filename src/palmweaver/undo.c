@@ -384,6 +384,20 @@ int Undo_CanRedo(void)
     return s_redoCount > 0;
 }
 
+int Undo_PeekUndoPos(int *outPos)
+{
+    if (!outPos || s_undoCount <= 0) return 0;
+    *outPos = s_undoStack[s_undoCount - 1].pos;
+    return 1;
+}
+
+int Undo_PeekRedoPos(int *outPos)
+{
+    if (!outPos || s_redoCount <= 0) return 0;
+    *outPos = s_undoStack[s_undoCount].pos;
+    return 1;
+}
+
 void Undo_ShiftPositions(int delta)
 {
     int i;
@@ -394,8 +408,6 @@ void Undo_ShiftPositions(int delta)
     if (count > UNDO_MAX_ENTRIES) count = UNDO_MAX_ENTRIES;
 
     for (i = 0; i < count; i++) {
-        int newPos = s_undoStack[i].pos + delta;
-        if (newPos < 0) newPos = 0;
-        s_undoStack[i].pos = newPos;
+        s_undoStack[i].pos = s_undoStack[i].pos + delta;
     }
 }

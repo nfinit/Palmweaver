@@ -52,6 +52,10 @@ void Undo_Clear(void);
 int Undo_CanUndo(void);
 int Undo_CanRedo(void);
 
+/* Peek next undo/redo position without mutating stack state. */
+int Undo_PeekUndoPos(int *outPos);
+int Undo_PeekRedoPos(int *outPos);
+
 /* Shift recorded positions by delta (used when edit-local coordinates move). */
 void Undo_ShiftPositions(int delta);
 
