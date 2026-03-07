@@ -139,6 +139,7 @@ static COLORREF g_origHighlightText;
 int g_bUseTabs = 1;    /* Use tabs (1) or spaces (0) */
 int g_nTabSize = 4;    /* Number of spaces per tab */
 int g_nColumnLimit = 80;  /* Column limit for reflow */
+int g_bAutoWrapTyping = 0;  /* Hard-wrap while typing at column limit */
 int g_bShowColumnIndicator = 0;  /* Show visual column indicator (off by default) */
 
 /* Quick Note settings */
@@ -2177,6 +2178,43 @@ static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         SendMessageW(hwnd, EM_REPLACESEL, TRUE, (LPARAM)spaces);
         return 0;
     }
+
+    /* Optional hard wrap while typing at column limit. */
+    if (msg == WM_CHAR && wParam >= 32 && GetKeyState(VK_CONTROL) >= 0 && g_bAutoWrapTyping) {
+        DWORD selStart, selEnd;
+        int line;
+        int lineStart;
+        int lineLen;
+        int col;
+        wchar_t insertBuf[4];
+        int insertLen;
+
+        SendMessage(hwnd, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        if (selStart == selEnd) {
+            line = (int)SendMessageW(hwnd, EM_LINEFROMCHAR, selStart, 0);
+            lineStart = (int)SendMessageW(hwnd, EM_LINEINDEX, line, 0);
+            lineLen = (int)SendMessageW(hwnd, EM_LINELENGTH, selStart, 0);
+            if (lineStart >= 0 && lineLen >= 0 && selStart == (DWORD)(lineStart + lineLen)) {
+                col = (int)selStart - lineStart;
+                if (col >= g_nColumnLimit) {
+                    g_bForceImmediateLineNum = 1;
+                    insertBuf[0] = L'\r';
+                    insertBuf[1] = L'\n';
+                    if ((wchar_t)wParam == L' ') {
+                        insertBuf[2] = 0;
+                        insertLen = 2;
+                    } else {
+                        insertBuf[2] = (wchar_t)wParam;
+                        insertBuf[3] = 0;
+                        insertLen = 3;
+                    }
+                    Undo_RecordInsert(selStart, insertBuf, insertLen);
+                    SendMessageW(hwnd, EM_REPLACESEL, TRUE, (LPARAM)insertBuf);
+                    return 0;
+                }
+            }
+        }
+    }
     
     /* Track typed characters for undo */
     if (msg == WM_CHAR && wParam >= 32 && GetKeyState(VK_CONTROL) >= 0) {
@@ -3868,6 +3906,7 @@ static HWND g_hwndOptColumnLimit = NULL;
 static HWND g_hwndOptFixedFont = NULL;
 static HWND g_hwndOptShowColInd = NULL;
 static HWND g_hwndOptNewlineMode = NULL;
+static HWND g_hwndOptAutoWrap = NULL;
 /* Options dialog control IDs */
 #define IDC_OPT_TAB       100
 #define IDC_OPT_USETABS   101
@@ -3883,6 +3922,7 @@ static HWND g_hwndOptNewlineMode = NULL;
 #define IDC_OPT_QNAUTOINIT  111
 #define IDC_OPT_SHOWCOLIND  112
 #define IDC_OPT_NEWLINEMODE 113
+#define IDC_OPT_AUTOWRAP    114
 
 /* External: settings */
 void ClearSettings(void);
@@ -3913,7 +3953,7 @@ static void UpdateFont(void)
 
 /* Options dialog - tabbed layout */
 static HWND g_hwndOptTab = NULL;
-#define OPT_EDITOR_CTRL_COUNT 11
+#define OPT_EDITOR_CTRL_COUNT 12
 #define OPT_DISPLAY_CTRL_COUNT 5
 #define OPT_STORAGE_CTRL_COUNT 2
 static HWND g_optEditorCtrls[OPT_EDITOR_CTRL_COUNT];   /* Editor tab controls */
@@ -3987,15 +4027,20 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 x + 140, y + 24, 105, 20, g_hwndOptTab, (HMENU)IDC_OPT_SHOWCOLIND, g_hInst, NULL);
             g_hwndOptShowColInd = g_optEditorCtrls[7];
             if (g_bShowColumnIndicator) SendMessage(g_hwndOptShowColInd, BM_SETCHECK, 1, 0);
-            g_optEditorCtrls[8] = CreateWindowW(L"BUTTON", L"Clear Settings and Registry...",
+            g_optEditorCtrls[8] = CreateWindowW(L"BUTTON", L"Auto-wrap at column limit",
+                WS_CHILD | BS_AUTOCHECKBOX,
+                x, y + 50, 140, 20, g_hwndOptTab, (HMENU)IDC_OPT_AUTOWRAP, g_hInst, NULL);
+            g_hwndOptAutoWrap = g_optEditorCtrls[8];
+            SendMessage(g_hwndOptAutoWrap, BM_SETCHECK, g_bAutoWrapTyping, 0);
+            g_optEditorCtrls[9] = CreateWindowW(L"BUTTON", L"Clear Settings and Registry...",
                 WS_CHILD | BS_PUSHBUTTON,
                 x, y + 74, 205, 22, g_hwndOptTab, (HMENU)IDC_OPT_CLEARREG, g_hInst, NULL);
-            g_optEditorCtrls[9] = CreateWindowW(L"STATIC", L"Newlines:",
-                WS_CHILD, x, y + 53, 50, 16, g_hwndOptTab, NULL, g_hInst, NULL);
-            g_optEditorCtrls[10] = CreateWindowW(L"COMBOBOX", NULL,
+            g_optEditorCtrls[10] = CreateWindowW(L"STATIC", L"Newlines:",
+                WS_CHILD, x + 145, y + 53, 50, 16, g_hwndOptTab, NULL, g_hInst, NULL);
+            g_optEditorCtrls[11] = CreateWindowW(L"COMBOBOX", NULL,
                 WS_CHILD | CBS_DROPDOWNLIST,
-                x + 52, y + 50, 105, 90, g_hwndOptTab, (HMENU)IDC_OPT_NEWLINEMODE, g_hInst, NULL);
-            g_hwndOptNewlineMode = g_optEditorCtrls[10];
+                x + 192, y + 50, 55, 90, g_hwndOptTab, (HMENU)IDC_OPT_NEWLINEMODE, g_hInst, NULL);
+            g_hwndOptNewlineMode = g_optEditorCtrls[11];
             SendMessageW(g_hwndOptNewlineMode, CB_ADDSTRING, 0, (LPARAM)L"Auto");
             SendMessageW(g_hwndOptNewlineMode, CB_ADDSTRING, 0, (LPARAM)L"CRLF");
             SendMessageW(g_hwndOptNewlineMode, CB_ADDSTRING, 0, (LPARAM)L"LF");
@@ -4071,6 +4116,7 @@ static LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (size >= 20 && size <= 200) g_nColumnLimit = size;
             
             g_bShowColumnIndicator = (int)SendMessage(g_hwndOptShowColInd, BM_GETCHECK, 0, 0);
+            g_bAutoWrapTyping = (int)SendMessage(g_hwndOptAutoWrap, BM_GETCHECK, 0, 0);
             InvalidateColumnIndicator();
 
             newSizeIdx = (int)SendMessageW(g_optDisplayCtrls[1], CB_GETCURSEL, 0, 0);

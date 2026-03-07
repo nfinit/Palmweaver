@@ -22,6 +22,7 @@ extern int g_bHideTaskbar;
 extern int g_bUseTabs;
 extern int g_nTabSize;
 extern int g_nColumnLimit;
+extern int g_bAutoWrapTyping;
 extern int g_bShowColumnIndicator;
 extern int g_nNewlineMode;
 extern int g_bQuickNoteStorage;
@@ -89,6 +90,10 @@ void LoadSettings(void)
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"ColumnLimit", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_nColumnLimit = (int)val;
+
+    size = sizeof(DWORD);
+    if (RegQueryValueExW(hKey, L"AutoWrapTyping", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+        g_bAutoWrapTyping = (int)val;
 
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"ShowColumnIndicator", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
@@ -181,6 +186,9 @@ void SaveSettings(void)
     val = (DWORD)g_nColumnLimit;
     RegSetValueExW(hKey, L"ColumnLimit", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
+    val = (DWORD)g_bAutoWrapTyping;
+    RegSetValueExW(hKey, L"AutoWrapTyping", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
+
     val = (DWORD)g_bShowColumnIndicator;
     RegSetValueExW(hKey, L"ShowColumnIndicator", 0, REG_DWORD, (LPBYTE)&val, sizeof(DWORD));
 
@@ -245,6 +253,7 @@ void ClearSettings(void)
     g_bUseTabs = 1;
     g_nTabSize = 4;
     g_nColumnLimit = 80;
+    g_bAutoWrapTyping = 0;
     g_nNewlineMode = 0;
     g_bQuickNoteStorage = 0;
     g_bQuickNoteAutoInit = 0;
