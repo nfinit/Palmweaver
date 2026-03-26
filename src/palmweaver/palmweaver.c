@@ -3761,7 +3761,7 @@ static void DoInsertRule(void)
 static void DoReflow(void)
 {
     int selStart, selEnd, paraStart, paraEnd;
-    int selLen, len, col, i, wordStart;
+    int selLen, len, col, i, j, wordStart, blankCount;
     int busy = 0;
     wchar_t *text = NULL;
     wchar_t *out = NULL;
@@ -3836,9 +3836,39 @@ static void DoReflow(void)
     for (i = 0; i <= len; i++) {
         wchar_t ch = text[i];
 
-        /* Convert \r\n to space */
+        /* Handle line breaks: preserve paragraph boundaries (blank lines) */
         if (ch == L'\r') continue;
-        if (ch == L'\n') ch = L' ';
+        if (ch == L'\n') {
+            /* Peek ahead for blank line (paragraph boundary) */
+            j = i + 1;
+            blankCount = 0;
+            while (j < len) {
+                if (text[j] == L'\r' && j + 1 < len && text[j + 1] == L'\n') {
+                    blankCount++;
+                    j += 2;
+                } else if (text[j] == L'\n') {
+                    blankCount++;
+                    j++;
+                } else {
+                    break;
+                }
+            }
+            if (blankCount > 0) {
+                /* Paragraph break: trim trailing space, preserve blank lines */
+                if (p > out && *(p-1) == L' ') p--;
+                *p++ = L'\r'; *p++ = L'\n';
+                while (blankCount > 0) {
+                    *p++ = L'\r'; *p++ = L'\n';
+                    blankCount--;
+                }
+                col = 0;
+                wordStart = -1;
+                i = j - 1;
+                continue;
+            }
+            /* Single line break within paragraph: convert to space */
+            ch = L' ';
+        }
 
         /* Skip multiple spaces */
         if (ch == L' ' && (p == out || *(p-1) == L' ' || *(p-1) == L'\n')) continue;

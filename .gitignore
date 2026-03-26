@@ -2,5 +2,10 @@
 ._*
 .DS_Store
 # Agent steering
+AGENTS.md
+GEMINI.md
+CLAUDE.md
 AGENTS/
 .kiro/
+.gemini/
+.claude/

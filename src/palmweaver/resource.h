@@ -7,7 +7,7 @@
 #define RESOURCE_H
 
 /* Version */
-#define PALMWEAVER_VERSION      L"0.3.0.226"
+#define PALMWEAVER_VERSION      L"0.3.0.227"
 
 /* Menu */
 #define IDR_MENU                101
