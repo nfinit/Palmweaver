@@ -222,6 +222,7 @@ static int EnsureLineNumBuffers(int requiredChars);
 static void MarkStatusTotalsDirty(void);
 static void UpdateStatus(void);
 static void SetStatusMessage(const wchar_t *msg);
+static void SetSavedStatusMessage(const wchar_t *path);
 static void ClearStatusMessage(void);
 static int CaptureEditRangeTextFull(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen);
 static int CaptureEditRangeText(HWND hwnd, DWORD start, DWORD end, wchar_t **outText, int *outLen);
@@ -4828,6 +4829,26 @@ static void SetStatusMessage(const wchar_t *msg)
     }
 }
 
+static void SetSavedStatusMessage(const wchar_t *path)
+{
+    wchar_t msg[128];
+    const wchar_t prefix[] = L"Saved: ";
+    int i;
+    int pos;
+
+    pos = 0;
+    for (i = 0; prefix[i] && pos < 127; i++) {
+        msg[pos++] = prefix[i];
+    }
+    if (path) {
+        for (i = 0; path[i] && pos < 127; i++) {
+            msg[pos++] = path[i];
+        }
+    }
+    msg[pos] = 0;
+    SetStatusMessage(msg);
+}
+
 /*
  * ClearStatusMessage - Clear temporary message, restore normal status
  */
@@ -5144,13 +5165,7 @@ static int DoFileSave(void)
 
     g_bDirty = 0;
     UpdateTitle();
-
-    /* Show save confirmation in status bar */
-    {
-        wchar_t msg[128];
-        wsprintfW(msg, L"Saved: %s", g_szFilePath);
-        SetStatusMessage(msg);
-    }
+    SetSavedStatusMessage(g_szFilePath);
     return 1;
 }
 
