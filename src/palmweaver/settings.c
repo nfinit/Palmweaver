@@ -34,6 +34,36 @@ extern int g_recentCount;
 void FilePickerGetLastDir(wchar_t *buf, int maxLen);
 void FilePickerSetLastDir(const wchar_t *dir);
 
+static int NormalizeBool(int value)
+{
+    return value ? 1 : 0;
+}
+
+static void NormalizeLoadedSettings(void)
+{
+    g_bWordWrap = NormalizeBool(g_bWordWrap);
+    g_bShowLineNums = NormalizeBool(g_bShowLineNums);
+    g_bShowStatusBar = NormalizeBool(g_bShowStatusBar);
+    g_bInverseColors = NormalizeBool(g_bInverseColors);
+    g_bThemedSelection = NormalizeBool(g_bThemedSelection);
+    g_bShowScrollbars = NormalizeBool(g_bShowScrollbars);
+    g_bHideTaskbar = NormalizeBool(g_bHideTaskbar);
+    g_bUseTabs = NormalizeBool(g_bUseTabs);
+    g_bAutoWrapTyping = NormalizeBool(g_bAutoWrapTyping);
+    g_bShowColumnIndicator = NormalizeBool(g_bShowColumnIndicator);
+    g_bQuickNoteStorage = NormalizeBool(g_bQuickNoteStorage);
+    g_bQuickNoteAutoInit = NormalizeBool(g_bQuickNoteAutoInit);
+
+    if (g_nTheme < 0 || g_nTheme > 3)
+        g_nTheme = 0;
+    if (g_nTabSize < 1 || g_nTabSize > 8)
+        g_nTabSize = 4;
+    if (g_nColumnLimit < 20 || g_nColumnLimit > 200)
+        g_nColumnLimit = 80;
+    if (g_nNewlineMode < 0 || g_nNewlineMode > 2)
+        g_nNewlineMode = 0;
+}
+
 /*
  * LoadSettings - Load settings from registry
  */
@@ -103,9 +133,6 @@ void LoadSettings(void)
     if (RegQueryValueExW(hKey, L"NewlineMode", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_nNewlineMode = (int)val;
 
-    if (g_nNewlineMode < 0 || g_nNewlineMode > 2)
-        g_nNewlineMode = 0;
-
     size = sizeof(DWORD);
     if (RegQueryValueExW(hKey, L"QuickNoteStorage", NULL, &type, (LPBYTE)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
         g_bQuickNoteStorage = (int)val;
@@ -133,6 +160,7 @@ void LoadSettings(void)
             FilePickerSetLastDir(lastDir);
     }
 
+    NormalizeLoadedSettings();
     RegCloseKey(hKey);
 }
 
