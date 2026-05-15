@@ -42,6 +42,7 @@ static WNDPROC g_pfnBtnProc = NULL;
 #define TYPEAHEAD_TIMER_ID 1
 #define TYPEAHEAD_TIMEOUT 800
 #define TYPEAHEAD_MAX 16
+#define PICKER_ITEM_CHARS (MAX_PATH + 2)
 static wchar_t g_typeAhead[TYPEAHEAD_MAX + 1];
 static int g_typeAheadLen = 0;
 
@@ -57,6 +58,92 @@ static void TabNext(HWND from);
 static void TabPrev(HWND from);
 
 #define IDC_NEWFOLDER 104
+
+/*============================================================================
+** Bounded string/path helpers
+**============================================================================*/
+
+static int CopyStringBounded(wchar_t *dst, int dstChars, const wchar_t *src)
+{
+    int i;
+
+    if (!dst || dstChars <= 0) return 0;
+    if (!src) {
+        dst[0] = 0;
+        return 1;
+    }
+
+    for (i = 0; i < dstChars - 1 && src[i]; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = 0;
+    return src[i] == 0;
+}
+
+static int AppendStringBounded(wchar_t *dst, int dstChars, const wchar_t *src)
+{
+    int pos;
+    int i;
+
+    if (!dst || dstChars <= 0) return 0;
+    pos = 0;
+    while (pos < dstChars && dst[pos]) pos++;
+    if (pos >= dstChars) {
+        dst[dstChars - 1] = 0;
+        return 0;
+    }
+    if (!src) return 1;
+
+    for (i = 0; pos < dstChars - 1 && src[i]; i++) {
+        dst[pos++] = src[i];
+    }
+    dst[pos] = 0;
+    return src[i] == 0;
+}
+
+static int JoinPathBounded(wchar_t *dst, int dstChars, const wchar_t *dir, const wchar_t *name)
+{
+    if (!dst || dstChars <= 0) return 0;
+    dst[0] = 0;
+
+    if (!dir || !dir[0] || lstrcmpW(dir, L"\\") == 0) {
+        if (!CopyStringBounded(dst, dstChars, L"\\")) return 0;
+        return AppendStringBounded(dst, dstChars, name);
+    }
+
+    if (!CopyStringBounded(dst, dstChars, dir)) return 0;
+    if (!AppendStringBounded(dst, dstChars, L"\\")) return 0;
+    return AppendStringBounded(dst, dstChars, name);
+}
+
+static int BuildFindPatternBounded(wchar_t *dst, int dstChars, const wchar_t *dir, const wchar_t *ext)
+{
+    wchar_t wildcard[40];
+
+    if (ext && ext[0]) {
+        if (!CopyStringBounded(wildcard, 40, L"*.")) return 0;
+        if (!AppendStringBounded(wildcard, 40, ext)) return 0;
+    } else {
+        if (!CopyStringBounded(wildcard, 40, L"*.*")) return 0;
+    }
+
+    return JoinPathBounded(dst, dstChars, dir, wildcard);
+}
+
+static int AppendExtBounded(wchar_t *path, int pathChars, const wchar_t *ext)
+{
+    if (!ext || !ext[0]) return 1;
+    if (!AppendStringBounded(path, pathChars, L".")) return 0;
+    return AppendStringBounded(path, pathChars, ext);
+}
+
+static void ShowPathTooLong(void)
+{
+    MessageBoxW(g_hwndPicker,
+        L"Path is too long.",
+        L"Palmweaver",
+        MB_OK | MB_ICONEXCLAMATION);
+}
 
 /*============================================================================
 ** Helper: Get extension from current filter selection
@@ -301,8 +388,12 @@ static void SortAndAdd(wchar_t *entries, int count, int bracket)
     for (i = 0; i < count; i++) {
         cur = entries + (i * MAX_PATH);
         if (bracket) {
-            wchar_t item[MAX_PATH];
-            wsprintfW(item, L"[%s]", cur);
+            wchar_t item[PICKER_ITEM_CHARS];
+            item[0] = L'[';
+            if (!CopyStringBounded(item + 1, PICKER_ITEM_CHARS - 1, cur) ||
+                    !AppendStringBounded(item, PICKER_ITEM_CHARS, L"]")) {
+                continue;
+            }
             SendMessageW(g_hwndList, LB_ADDSTRING, 0, (LPARAM)item);
         } else {
             SendMessageW(g_hwndList, LB_ADDSTRING, 0, (LPARAM)cur);
@@ -339,10 +430,9 @@ static void PopulateFileList(void)
 
     /* Collect subdirectories */
     count = 0;
-    if (atRoot) {
-        lstrcpyW(pattern, L"\\*");
-    } else {
-        wsprintfW(pattern, L"%s\\*", g_pickerDir);
+    if (!JoinPathBounded(pattern, MAX_PATH, g_pickerDir, L"*")) {
+        ShowPathTooLong();
+        return;
     }
 
     hFind = FindFirstFileW(pattern, &fd);
@@ -363,18 +453,10 @@ static void PopulateFileList(void)
     /* Collect files matching filter */
     count = 0;
     GetCurrentFilterExt(ext, 32);
-    if (atRoot) {
-        if (ext[0]) {
-            wsprintfW(pattern, L"\\*.%s", ext);
-        } else {
-            lstrcpyW(pattern, L"\\*.*");
-        }
-    } else {
-        if (ext[0]) {
-            wsprintfW(pattern, L"%s\\*.%s", g_pickerDir, ext);
-        } else {
-            wsprintfW(pattern, L"%s\\*.*", g_pickerDir);
-        }
+    if (!BuildFindPatternBounded(pattern, MAX_PATH, g_pickerDir, ext)) {
+        if (entries) LocalFree(entries);
+        ShowPathTooLong();
+        return;
     }
 
     hFind = FindFirstFileW(pattern, &fd);
@@ -414,7 +496,7 @@ static void PopulateFileList(void)
 static void OnItemActivate(void)
 {
     int sel;
-    wchar_t item[MAX_PATH];
+    wchar_t item[PICKER_ITEM_CHARS];
     wchar_t newPath[MAX_PATH];
     wchar_t *p;
 
@@ -432,7 +514,7 @@ static void OnItemActivate(void)
             p = g_pickerDir + lstrlenW(g_pickerDir) - 1;
             while (p > g_pickerDir && *p != L'\\') p--;
             if (p == g_pickerDir) {
-                lstrcpyW(g_pickerDir, L"\\");
+                CopyStringBounded(g_pickerDir, MAX_PATH, L"\\");
             } else {
                 *p = 0;
             }
@@ -441,25 +523,27 @@ static void OnItemActivate(void)
             wchar_t dirName[MAX_PATH];
             int i = 0;
             const wchar_t *q = item + 1;
-            while (*q && *q != L']') dirName[i++] = *q++;
+            while (*q && *q != L']' && i < MAX_PATH - 1) dirName[i++] = *q++;
             dirName[i] = 0;
-
-            if (lstrcmpW(g_pickerDir, L"\\") == 0) {
-                wsprintfW(newPath, L"\\%s", dirName);
-            } else {
-                wsprintfW(newPath, L"%s\\%s", g_pickerDir, dirName);
+            if (*q != L']') {
+                ShowPathTooLong();
+                return;
             }
-            lstrcpyW(g_pickerDir, newPath);
+
+            if (!JoinPathBounded(newPath, MAX_PATH, g_pickerDir, dirName)) {
+                ShowPathTooLong();
+                return;
+            }
+            CopyStringBounded(g_pickerDir, MAX_PATH, newPath);
         }
         PopulateFileList();
     } else {
         /* File selected */
         SetWindowTextW(g_hwndFilename, item);
 
-        if (lstrcmpW(g_pickerDir, L"\\") == 0) {
-            wsprintfW(g_pickerResult, L"\\%s", item);
-        } else {
-            wsprintfW(g_pickerResult, L"%s\\%s", g_pickerDir, item);
+        if (!JoinPathBounded(g_pickerResult, MAX_PATH, g_pickerDir, item)) {
+            ShowPathTooLong();
+            return;
         }
 
         if (g_pickerSaveMode) {
@@ -572,10 +656,9 @@ static void OnNewFolder(void)
     if (!g_newFolderOK || !g_newFolderName[0]) return;
 
     /* Build full path */
-    if (lstrcmpW(g_pickerDir, L"\\") == 0) {
-        wsprintfW(path, L"\\%s", g_newFolderName);
-    } else {
-        wsprintfW(path, L"%s\\%s", g_pickerDir, g_newFolderName);
+    if (!JoinPathBounded(path, MAX_PATH, g_pickerDir, g_newFolderName)) {
+        ShowPathTooLong();
+        return;
     }
 
     if (CreateDirectoryW(path, NULL)) {
@@ -750,7 +833,7 @@ static LRESULT CALLBACK PickerListProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 wchar_t *p = g_pickerDir + lstrlenW(g_pickerDir) - 1;
                 while (p > g_pickerDir && *p != L'\\') p--;
                 if (p == g_pickerDir) {
-                    lstrcpyW(g_pickerDir, L"\\");
+                    CopyStringBounded(g_pickerDir, MAX_PATH, L"\\");
                 } else {
                     *p = 0;
                 }
@@ -791,10 +874,10 @@ static LRESULT CALLBACK PickerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 wchar_t ext[32];
                 int hasExt = 0;
 
-                if (lstrcmpW(g_pickerDir, L"\\") == 0) {
-                    wsprintfW(g_pickerResult, L"\\%s", filename);
-                } else {
-                    wsprintfW(g_pickerResult, L"%s\\%s", g_pickerDir, filename);
+                if (!JoinPathBounded(g_pickerResult, MAX_PATH, g_pickerDir, filename)) {
+                    ShowPathTooLong();
+                    SetFocus(g_hwndFilename);
+                    return 0;
                 }
 
                 /* Add extension if missing */
@@ -806,11 +889,17 @@ static LRESULT CALLBACK PickerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 if (!hasExt) {
                     GetCurrentFilterExt(ext, 32);
                     if (ext[0]) {
-                        lstrcatW(g_pickerResult, L".");
-                        lstrcatW(g_pickerResult, ext);
+                        if (!AppendExtBounded(g_pickerResult, MAX_PATH, ext)) {
+                            ShowPathTooLong();
+                            SetFocus(g_hwndFilename);
+                            return 0;
+                        }
                     } else if (g_pickerDefExt && g_pickerDefExt[0]) {
-                        lstrcatW(g_pickerResult, L".");
-                        lstrcatW(g_pickerResult, g_pickerDefExt);
+                        if (!AppendExtBounded(g_pickerResult, MAX_PATH, g_pickerDefExt)) {
+                            ShowPathTooLong();
+                            SetFocus(g_hwndFilename);
+                            return 0;
+                        }
                     }
                 }
 
@@ -845,7 +934,7 @@ static LRESULT CALLBACK PickerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         if (cmd == 101 && notify == LBN_SELCHANGE) {
             int sel = (int)SendMessageW(g_hwndList, LB_GETCURSEL, 0, 0);
             if (sel >= 0) {
-                wchar_t item[MAX_PATH];
+                wchar_t item[PICKER_ITEM_CHARS];
                 SendMessageW(g_hwndList, LB_GETTEXT, sel, (LPARAM)item);
                 if (item[0] != L'[') {
                     SetWindowTextW(g_hwndFilename, item);
@@ -898,8 +987,6 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
     int dlgW = 360, dlgH = 195;
     int filterW = 70;
 
-    (void)maxPath;
-
     /* Initialize state */
     g_pickerResult[0] = 0;
     g_pickerFilter = filter;
@@ -910,15 +997,17 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
 
     /* Use last directory if available, otherwise default directory, otherwise root */
     if (g_lastDir[0]) {
-        lstrcpyW(g_pickerDir, g_lastDir);
+        CopyStringBounded(g_pickerDir, MAX_PATH, g_lastDir);
     } else if (initialDir && initialDir[0]) {
-        lstrcpyW(g_pickerDir, initialDir);
+        if (!CopyStringBounded(g_pickerDir, MAX_PATH, initialDir)) {
+            CopyStringBounded(g_pickerDir, MAX_PATH, L"\\");
+        }
     } else {
         DWORD attr = GetFileAttributesW(g_defaultDir);
         if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            lstrcpyW(g_pickerDir, g_defaultDir);
+            CopyStringBounded(g_pickerDir, MAX_PATH, g_defaultDir);
         } else {
-            lstrcpyW(g_pickerDir, L"\\");
+            CopyStringBounded(g_pickerDir, MAX_PATH, L"\\");
         }
     }
 
@@ -930,9 +1019,9 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
             /* Try default directory */
             attr = GetFileAttributesW(g_defaultDir);
             if (attr != 0xFFFFFFFF && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                lstrcpyW(g_pickerDir, g_defaultDir);
+                CopyStringBounded(g_pickerDir, MAX_PATH, g_defaultDir);
             } else {
-                lstrcpyW(g_pickerDir, L"\\");
+                CopyStringBounded(g_pickerDir, MAX_PATH, L"\\");
             }
         }
     }
@@ -945,7 +1034,7 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
             if (*p == L'\\') fn = p + 1;
             p++;
         }
-        lstrcpyW(g_pickerResult, fn);
+        CopyStringBounded(g_pickerResult, MAX_PATH, fn);
     }
 
     /* Register window class once */
@@ -1028,9 +1117,12 @@ int FilePicker(HWND hwndOwner, wchar_t *filePath, int maxPath,
     SetForegroundWindow(hwndOwner);
 
     if (g_pickerOK && g_pickerResult[0]) {
-        lstrcpyW(filePath, g_pickerResult);
+        if (!CopyStringBounded(filePath, maxPath, g_pickerResult)) {
+            ShowPathTooLong();
+            return 0;
+        }
         /* Remember directory for session */
-        lstrcpyW(g_lastDir, g_pickerDir);
+        CopyStringBounded(g_lastDir, MAX_PATH, g_pickerDir);
         return 1;
     }
     return 0;
@@ -1055,6 +1147,6 @@ void FilePickerGetLastDir(wchar_t *buf, int maxLen)
 void FilePickerSetLastDir(const wchar_t *dir)
 {
     if (dir && dir[0]) {
-        lstrcpyW(g_lastDir, dir);
+        CopyStringBounded(g_lastDir, MAX_PATH, dir);
     }
 }
